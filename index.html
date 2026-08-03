@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>GitHub Pages Remote Client</title>
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0f172a; color: #fff; padding: 20px; }
+    #chat { border: 1px solid #334155; height: 300px; padding: 10px; overflow-y: auto; margin-bottom: 10px; }
+    input, button { padding: 10px; font-size: 14px; }
+    input { width: 300px; background: #1e293b; color: #fff; border: 1px solid #334155; }
+    button { background: #2563eb; color: white; border: none; cursor: pointer; }
+  </style>
+</head>
+<body>
+
+  <h2>GitHub Pages Client</h2>
+  
+  <div>
+    <label>Target Session ID:</label>
+    <input type="text" id="targetSessionId" placeholder="e.g. ai-session-x9k2p1">
+    <button id="connectBtn">Connect to Session</button>
+  </div>
+
+  <br>
+  <div id="chat"></div>
+
+  <input type="text" id="msgInput" placeholder="Enter prompt...">
+  <button id="sendBtn" disabled>Send API Request</button>
+
+  <script>
+    const peer = new Peer(); // Create client
+    let conn = null;
+
+    const chat = document.getElementById("chat");
+    const targetSessionInput = document.getElementById("targetSessionId");
+    const connectBtn = document.getElementById("connectBtn");
+    const msgInput = document.getElementById("msgInput");
+    const sendBtn = document.getElementById("sendBtn");
+
+    let currentAiBubble = null;
+
+    // Connect to the AI Host Session ID
+    connectBtn.addEventListener("click", () => {
+      const targetId = targetSessionInput.value.trim();
+      if (!targetId) return alert("Enter target Session ID!");
+
+      conn = peer.connect(targetId);
+
+      conn.on("open", () => {
+        chat.innerHTML += `<div style="color: #38bdf8;">Connected to Session: ${targetId}</div>`;
+        sendBtn.disabled = false;
+      });
+
+      // Receive incoming API responses from Host Website
+      conn.on("data", (data) => {
+        if (data.type === "CHUNK") {
+          if (currentAiBubble) currentAiBubble.innerText = "AI: " + data.text;
+        } 
+        else if (data.type === "RESPONSE_COMPLETE") {
+          if (currentAiBubble) currentAiBubble.innerText = "AI: " + data.text;
+          currentAiBubble = null;
+        }
+        else if (data.type === "ERROR") {
+          if (currentAiBubble) currentAiBubble.innerText = "Error: " + data.text;
+        }
+      });
+    });
+
+    // Send prompt to host session
+    sendBtn.addEventListener("click", () => {
+      const text = msgInput.value.trim();
+      if (!text || !conn) return;
+
+      chat.innerHTML += `<div><b>You:</b> ${text}</div>`;
+      
+      currentAiBubble = document.createElement("div");
+      currentAiBubble.style.color = "#4ade80";
+      currentAiBubble.innerText = "AI is typing...";
+      chat.appendChild(currentAiBubble);
+
+      // Send payload
+      conn.send({ type: "SEND_PROMPT", text: text });
+      msgInput.value = "";
+    });
+  </script>
+</body>
+</html>
