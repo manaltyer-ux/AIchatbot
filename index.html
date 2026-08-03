@@ -10,9 +10,10 @@
     input, button { padding: 10px; font-size: 14px; border-radius: 6px; }
     input { width: 300px; background: #0f172a; color: #fff; border: 1px solid #334155; }
     button { background: #2563eb; color: white; border: none; cursor: pointer; font-weight: bold; }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
     .status { color: #38bdf8; font-style: italic; margin: 4px 0; }
     .error { color: #f87171; font-weight: bold; }
+    .success { color: #4ade80; font-weight: bold; }
   </style>
 </head>
 <body>
@@ -22,7 +23,7 @@
   <div>
     <label>Target Session ID:</label>
     <input type="text" id="targetSessionId" placeholder="e.g. ai-session-x9k2p1">
-    <button id="connectBtn">Connect to Session</button>
+    <button id="connectBtn" disabled>Initializing...</button>
   </div>
 
   <br>
@@ -32,16 +33,13 @@
   <button id="sendBtn" disabled>Send API Request</button>
 
   <script>
-    // Initialize PeerJS with debugging enabled
-    const peer = new Peer({ debug: 2 });
-    let conn = null;
-
     const chat = document.getElementById("chat");
     const targetSessionInput = document.getElementById("targetSessionId");
     const connectBtn = document.getElementById("connectBtn");
     const msgInput = document.getElementById("msgInput");
     const sendBtn = document.getElementById("sendBtn");
 
+    let conn = null;
     let currentAiBubble = null;
 
     function logToChat(msg, className = "status") {
@@ -52,48 +50,56 @@
       chat.scrollTop = chat.scrollHeight;
     }
 
+    // Include Google STUN servers to guarantee traversal through routers/firewalls
+    const peer = new Peer({
+      debug: 2,
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' }
+        ]
+      }
+    });
+
     peer.on("open", (id) => {
       console.log("Client local peer ID:", id);
+      connectBtn.innerText = "Connect to Session";
+      connectBtn.disabled = false;
+      logToChat("Client peer initialized. Ready to connect to host.", "status");
     });
 
     peer.on("error", (err) => {
       console.error("PeerJS Client Error:", err);
-      logToChat(`Connection Error (${err.type}): ${err.message}`, "error");
+      logToChat(`Client Peer Error (${err.type}): ${err.message}`, "error");
       connectBtn.disabled = false;
+      connectBtn.innerText = "Connect to Session";
     });
 
-    // Connect to the AI Host Session ID
     connectBtn.addEventListener("click", () => {
       const targetId = targetSessionInput.value.trim();
       if (!targetId) return alert("Enter target Session ID!");
 
-      logToChat(`Connecting to target session: <b>${targetId}</b>...`);
+      if (!peer.id) {
+        return alert("Client PeerJS is still connecting to the server. Please wait a second.");
+      }
+
+      logToChat(`Initiating connection to target: <b>${targetId}</b>...`);
       connectBtn.disabled = true;
 
-      // Close previous connection if active
       if (conn) conn.close();
 
-      conn = peer.connect(targetId, { reliable: true });
+      // Connect to host peer
+      conn = peer.connect(targetId);
 
+      // Handshake complete
       conn.on("open", () => {
-        logToChat(`<span style="color: #4ade80;">Successfully Connected to Session: ${targetId}</span>`);
+        logToChat(`Connected to Session: ${targetId}`, "success");
         sendBtn.disabled = false;
         connectBtn.disabled = false;
+        connectBtn.innerText = "Re-Connect";
       });
 
-      conn.on("error", (err) => {
-        logToChat(`Connection failure: ${err}`, "error");
-        sendBtn.disabled = true;
-        connectBtn.disabled = false;
-      });
-
-      conn.on("close", () => {
-        logToChat(`Disconnected from Host.`, "error");
-        sendBtn.disabled = true;
-        connectBtn.disabled = false;
-      });
-
-      // Receive incoming API responses from Host Website
       conn.on("data", (data) => {
         if (data.type === "CHUNK") {
           if (currentAiBubble) currentAiBubble.innerText = "AI: " + data.text;
@@ -109,6 +115,18 @@
           sendBtn.disabled = false;
         }
       });
+
+      conn.on("error", (err) => {
+        logToChat(`Connection error: ${err}`, "error");
+        sendBtn.disabled = true;
+        connectBtn.disabled = false;
+      });
+
+      conn.on("close", () => {
+        logToChat(`Disconnected from Host.`, "error");
+        sendBtn.disabled = true;
+        connectBtn.disabled = false;
+      });
     });
 
     function sendPrompt() {
@@ -123,7 +141,6 @@
       chat.appendChild(currentAiBubble);
       chat.scrollTop = chat.scrollHeight;
 
-      // Send payload to host
       conn.send({ type: "SEND_PROMPT", text: text });
       msgInput.value = "";
       sendBtn.disabled = true;
