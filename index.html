@@ -35,8 +35,7 @@
   <button id="sendBtn" disabled>Send Request</button>
 
   <script>
-    // Generate unique Client ID
-    const UNIQUE_CLIENT_ID = "client-" + Math.random().toString(36).substring(2, 8);
+    const UNIQUE_CLIENT_ID = "client-" + Math.random().toString(36).substring(2, 9);
     document.getElementById("clientBadge").innerText = `ID: ${UNIQUE_CLIENT_ID}`;
 
     const chat = document.getElementById("chat");
@@ -46,6 +45,7 @@
 
     let client = null;
     let activeServerId = "";
+    let activeResponseTopic = "";
     let currentAiBubble = null;
     let activeRequestId = null;
     let watchdogTimer = null;
@@ -61,13 +61,11 @@
       chat.scrollTop = chat.scrollHeight;
     }
 
-    // Reset Rolling Watchdog Timer whenever stream chunks arrive
     function resetRollingWatchdog() {
       if (watchdogTimer) clearTimeout(watchdogTimer);
-      // Allows 45 seconds of inactivity between stream chunks before timing out
       watchdogTimer = setTimeout(() => {
         if (activeRequestId) {
-          logToChat("Request stalled (No streaming activity received for 45s). Unlocking send button.", "error");
+          logToChat("Request stalled (No streaming activity received for 45s).", "error");
           if (currentAiBubble) currentAiBubble.innerText = "Error: Stream timeout.";
           clearWatchdog();
           sendBtn.disabled = false;
@@ -84,26 +82,40 @@
 
     function autoSelectBestServer() {
       const now = Date.now();
-      let bestServer = null;
+      const healthyServers = [];
       let minQueue = 999;
 
+      // Filter healthy active servers
       Object.keys(discoveredServers).forEach(sid => {
         const s = discoveredServers[sid];
         if (now - s.lastSeen < 6000) {
           if (s.queueLength < minQueue) {
             minQueue = s.queueLength;
-            bestServer = sid;
           }
+          healthyServers.push({ sid, queueLength: s.queueLength });
         }
       });
 
-      if (bestServer && bestServer !== activeServerId) {
-        joinServerSession(bestServer);
+      // Find servers matching minimum queue length
+      const bestCandidates = healthyServers.filter(s => s.queueLength === minQueue);
+
+      if (bestCandidates.length > 0) {
+        // If current server is healthy and optimal, keep it
+        const currentIsOptimal = bestCandidates.some(c => c.sid === activeServerId);
+        if (!currentIsOptimal) {
+          // Randomly pick candidate to balance load evenly among tied servers
+          const chosen = bestCandidates[Math.floor(Math.random() * bestCandidates.length)].sid;
+          joinServerSession(chosen);
+        }
       }
     }
 
-    // Connect to WebSocket Relay
-    client = mqtt.connect('wss://broker.emqx.io:8084/mqtt');
+    // Connect to WebSocket Broker with unique options
+    client = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
+      clientId: UNIQUE_CLIENT_ID,
+      clean: true,
+      keepalive: 30
+    });
 
     client.on('connect', () => {
       logToChat("Relay connected. Scanning background host servers...", "status");
@@ -114,7 +126,6 @@
       try {
         const payload = JSON.parse(message.toString());
 
-        // 1. Background Server Auto-Discovery & Load-Balancing
         if (topic === HEARTBEAT_TOPIC) {
           if (payload && payload.serverId) {
             discoveredServers[payload.serverId] = {
@@ -126,7 +137,6 @@
           return;
         }
 
-        // 2. Private Response Payload Processing
         if (payload.requestId && payload.requestId === activeRequestId) {
           if (payload.type === "QUEUED") {
             resetRollingWatchdog();
@@ -137,7 +147,7 @@
             if (currentAiBubble) currentAiBubble.innerText = "AI is generating...";
           }
           else if (payload.type === "CHUNK") {
-            resetRollingWatchdog(); // Keeps connection alive on every streamed chunk!
+            resetRollingWatchdog();
             if (currentAiBubble) currentAiBubble.innerText = "AI: " + payload.text;
           } 
           else if (payload.type === "RESPONSE_COMPLETE") {
@@ -155,12 +165,16 @@
     });
 
     function joinServerSession(sessionId) {
+      if (activeResponseTopic) {
+        client.unsubscribe(activeResponseTopic);
+      }
+
       activeServerId = sessionId;
-      const clientResponseTopic = `ai-chat/${sessionId}/response/${UNIQUE_CLIENT_ID}`;
+      activeResponseTopic = `ai-chat/${sessionId}/response/${UNIQUE_CLIENT_ID}`;
       
-      client.subscribe(clientResponseTopic, (err) => {
+      client.subscribe(activeResponseTopic, (err) => {
         if (!err) {
-          serverStatus.innerHTML = `Server: <b class="success">${sessionId}</b>`;
+          serverStatus.innerHTML = `Connected Server: <b class="success">${sessionId}</b>`;
           sendBtn.disabled = false;
         }
       });
@@ -190,7 +204,6 @@
       msgInput.value = "";
       sendBtn.disabled = true;
 
-      // Start Initial Rolling Watchdog
       resetRollingWatchdog();
     }
 
