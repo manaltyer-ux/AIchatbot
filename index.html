@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <title>GitHub Pages Remote Client</title>
-  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
   <style>
     body { font-family: system-ui, sans-serif; background: #0f172a; color: #fff; padding: 20px; }
     #chat { border: 1px solid #334155; height: 350px; padding: 10px; overflow-y: auto; margin-bottom: 10px; border-radius: 8px; background: #1e293b; }
@@ -22,8 +22,8 @@
   
   <div>
     <label>Target Session ID:</label>
-    <input type="text" id="targetSessionId" placeholder="e.g. ai-session-host-1234">
-    <button id="connectBtn" disabled>Initializing...</button>
+    <input type="text" id="targetSessionId" placeholder="e.g. ai-session-123456">
+    <button id="connectBtn" disabled>Connecting Relay...</button>
   </div>
 
   <br>
@@ -39,9 +39,9 @@
     const msgInput = document.getElementById("msgInput");
     const sendBtn = document.getElementById("sendBtn");
 
-    let conn = null;
+    let client = null;
     let currentAiBubble = null;
-    let connectTimeout = null;
+    let currentSessionId = "";
 
     function logToChat(msg, className = "status") {
       const div = document.createElement("div");
@@ -51,63 +51,22 @@
       chat.scrollTop = chat.scrollHeight;
     }
 
-    // Initialize PeerJS Client
-    const peer = new Peer({
-      debug: 2,
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' }
-        ]
-      }
-    });
+    // Connect to WebSocket Relay Server
+    client = mqtt.connect('wss://broker.emqx.io:8084/mqtt');
 
-    peer.on("open", (id) => {
-      console.log("Client peer ID:", id);
+    client.on('connect', () => {
       connectBtn.innerText = "Connect to Session";
       connectBtn.disabled = false;
-      logToChat("Client ready. Enter Target Session ID from Host site.", "status");
+      logToChat("Relay Network Connected. Ready to join session.", "status");
     });
 
-    peer.on("error", (err) => {
-      console.error("PeerJS Client Error:", err);
-      logToChat(`Client Error (${err.type}): ${err.message}`, "error");
-      connectBtn.disabled = false;
-      connectBtn.innerText = "Connect to Session";
+    client.on('error', (err) => {
+      logToChat(`Relay Connection Error: ${err}`, "error");
     });
 
-    connectBtn.addEventListener("click", () => {
-      const targetId = targetSessionInput.value.trim();
-      if (!targetId) return alert("Enter target Session ID!");
-
-      logToChat(`Initiating connection to target: <b>${targetId}</b>...`);
-      connectBtn.disabled = true;
-
-      if (conn) conn.close();
-
-      // Create Connection
-      conn = peer.connect(targetId);
-
-      // Timeout Safety Check (10 seconds)
-      if (connectTimeout) clearTimeout(connectTimeout);
-      connectTimeout = setTimeout(() => {
-        if (!conn || !conn.open) {
-          logToChat("<b>Connection Timed Out!</b> Could not reach host. Check that:<br>1. Host page is open in browser.<br>2. Session ID matches exactly.<br>3. Both sites use HTTPS (or both on local dev).", "error");
-          connectBtn.disabled = false;
-          connectBtn.innerText = "Retry Connection";
-        }
-      }, 10000);
-
-      // Connection opened successfully
-      conn.on("open", () => {
-        if (connectTimeout) clearTimeout(connectTimeout);
-        logToChat(`Successfully Connected to Session: ${targetId}`, "success");
-        sendBtn.disabled = false;
-        connectBtn.disabled = false;
-        connectBtn.innerText = "Re-Connect";
-      });
-
-      conn.on("data", (data) => {
+    client.on('message', (topic, message) => {
+      try {
+        const data = JSON.parse(message.toString());
         if (data.type === "CHUNK") {
           if (currentAiBubble) currentAiBubble.innerText = "AI: " + data.text;
         } 
@@ -121,26 +80,31 @@
           currentAiBubble = null;
           sendBtn.disabled = false;
         }
-      });
+      } catch(e) { console.error("Error parsing message:", e); }
+    });
 
-      conn.on("error", (err) => {
-        if (connectTimeout) clearTimeout(connectTimeout);
-        logToChat(`Connection error: ${err}`, "error");
-        sendBtn.disabled = true;
-        connectBtn.disabled = false;
-      });
+    connectBtn.addEventListener("click", () => {
+      const targetId = targetSessionInput.value.trim();
+      if (!targetId) return alert("Enter Target Session ID!");
 
-      conn.on("close", () => {
-        if (connectTimeout) clearTimeout(connectTimeout);
-        logToChat(`Disconnected from Host.`, "error");
-        sendBtn.disabled = true;
-        connectBtn.disabled = false;
+      currentSessionId = targetId;
+
+      const responseTopic = `ai-chat/${targetId}/response`;
+      
+      // Subscribe to AI responses
+      client.subscribe(responseTopic, (err) => {
+        if (!err) {
+          logToChat(`Connected to Session: <b>${targetId}</b>`, "success");
+          sendBtn.disabled = false;
+        } else {
+          logToChat(`Failed to join session: ${err}`, "error");
+        }
       });
     });
 
     function sendPrompt() {
       const text = msgInput.value.trim();
-      if (!text || !conn) return;
+      if (!text || !currentSessionId) return;
 
       logToChat(`<b>You:</b> ${text}`, "");
       
@@ -150,7 +114,11 @@
       chat.appendChild(currentAiBubble);
       chat.scrollTop = chat.scrollHeight;
 
-      conn.send({ type: "SEND_PROMPT", text: text });
+      const promptTopic = `ai-chat/${currentSessionId}/prompt`;
+      
+      // Publish prompt payload over WebSockets
+      client.publish(promptTopic, JSON.stringify({ text: text }));
+      
       msgInput.value = "";
       sendBtn.disabled = true;
     }
