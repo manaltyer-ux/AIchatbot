@@ -2,215 +2,280 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GitHub Pages Remote Client</title>
   <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
   <style>
-    body { font-family: system-ui, sans-serif; background: #0f172a; color: #fff; padding: 20px; }
-    #header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; padding-bottom: 10px; margin-bottom: 15px; }
-    #chat { border: 1px solid #334155; height: 380px; padding: 12px; overflow-y: auto; margin-bottom: 10px; border-radius: 8px; background: #1e293b; }
-    input, button { padding: 10px; font-size: 14px; border-radius: 6px; }
-    input { width: 340px; background: #0f172a; color: #fff; border: 1px solid #334155; }
-    button { background: #2563eb; color: white; border: none; cursor: pointer; font-weight: bold; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #fff; padding: 20px; margin: 0; }
+    #container { max-width: 800px; margin: 0 auto; }
+    #header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; padding-bottom: 12px; margin-bottom: 15px; }
+    #chat { border: 1px solid #334155; height: 420px; padding: 14px; overflow-y: auto; margin-bottom: 12px; border-radius: 8px; background: #1e293b; display: flex; flex-direction: column; gap: 8px; }
+    #inputGroup { display: flex; gap: 8px; }
+    input { flex: 1; padding: 12px; font-size: 14px; border-radius: 6px; background: #0f172a; color: #fff; border: 1px solid #334155; outline: none; }
+    input:focus { border-color: #38bdf8; }
+    button { padding: 12px 20px; font-size: 14px; border-radius: 6px; background: #2563eb; color: white; border: none; cursor: pointer; font-weight: bold; }
     button:disabled { opacity: 0.4; cursor: not-allowed; }
-    .status { color: #38bdf8; font-style: italic; margin: 4px 0; font-size: 13px; }
-    .error { color: #f87171; font-weight: bold; }
+    .status { color: #38bdf8; font-style: italic; font-size: 13px; }
+    .error { color: #f87171; font-weight: bold; font-size: 13px; }
     .success { color: #4ade80; font-weight: bold; }
     .client-badge { font-size: 12px; background: #334155; padding: 4px 8px; border-radius: 4px; color: #38bdf8; font-family: monospace; }
     #serverStatus { font-size: 12px; color: #94a3b8; font-style: italic; }
+    .msg-user { color: #e2e8f0; background: #334155; padding: 8px 12px; border-radius: 6px; align-self: flex-end; max-width: 85%; }
+    .msg-ai { color: #4ade80; background: #0b1329; padding: 8px 12px; border-radius: 6px; align-self: flex-start; max-width: 85%; white-space: pre-wrap; word-break: break-word; }
   </style>
 </head>
 <body>
 
-  <div id="header">
-    <h2>GitHub Client</h2>
-    <div>
-      <span id="serverStatus">Auto-Connecting...</span>
-      <span class="client-badge" id="clientBadge">Client ID: Generating...</span>
+  <div id="container">
+    <div id="header">
+      <h2>GitHub Client</h2>
+      <div>
+        <span id="serverStatus">Connecting...</span>
+        <span class="client-badge" id="clientBadge">ID: Initializing...</span>
+      </div>
+    </div>
+
+    <div id="chat"></div>
+
+    <div id="inputGroup">
+      <input type="text" id="msgInput" placeholder="Enter prompt...">
+      <button id="sendBtn" disabled>Send</button>
     </div>
   </div>
 
-  <div id="chat"></div>
-
-  <input type="text" id="msgInput" placeholder="Enter prompt...">
-  <button id="sendBtn" disabled>Send Request</button>
-
   <script>
-    const UNIQUE_CLIENT_ID = "client-" + Math.random().toString(36).substring(2, 9);
-    document.getElementById("clientBadge").innerText = `ID: ${UNIQUE_CLIENT_ID}`;
-
-    const chat = document.getElementById("chat");
-    const msgInput = document.getElementById("msgInput");
-    const sendBtn = document.getElementById("sendBtn");
-    const serverStatus = document.getElementById("serverStatus");
-
-    let client = null;
-    let activeServerId = "";
-    let activeResponseTopic = "";
-    let currentAiBubble = null;
-    let activeRequestId = null;
-    let watchdogTimer = null;
-
-    const HEARTBEAT_TOPIC = "ai-chat/servers/heartbeat";
-    const discoveredServers = {};
-
-    function logToChat(msg, className = "status") {
-      const div = document.createElement("div");
-      div.className = className;
-      div.innerHTML = msg;
-      chat.appendChild(div);
-      chat.scrollTop = chat.scrollHeight;
-    }
-
-    function resetRollingWatchdog() {
-      if (watchdogTimer) clearTimeout(watchdogTimer);
-      watchdogTimer = setTimeout(() => {
-        if (activeRequestId) {
-          logToChat("Request stalled (No streaming activity received for 45s).", "error");
-          if (currentAiBubble) currentAiBubble.innerText = "Error: Stream timeout.";
-          clearWatchdog();
-          sendBtn.disabled = false;
-        }
-      }, 45000);
-    }
-
-    function clearWatchdog() {
-      if (watchdogTimer) clearTimeout(watchdogTimer);
-      watchdogTimer = null;
-      currentAiBubble = null;
-      activeRequestId = null;
-    }
-
-    function autoSelectBestServer() {
-      const now = Date.now();
-      const healthyServers = [];
-      let minQueue = 999;
-
-      // Filter healthy active servers
-      Object.keys(discoveredServers).forEach(sid => {
-        const s = discoveredServers[sid];
-        if (now - s.lastSeen < 6000) {
-          if (s.queueLength < minQueue) {
-            minQueue = s.queueLength;
-          }
-          healthyServers.push({ sid, queueLength: s.queueLength });
-        }
-      });
-
-      // Find servers matching minimum queue length
-      const bestCandidates = healthyServers.filter(s => s.queueLength === minQueue);
-
-      if (bestCandidates.length > 0) {
-        // If current server is healthy and optimal, keep it
-        const currentIsOptimal = bestCandidates.some(c => c.sid === activeServerId);
-        if (!currentIsOptimal) {
-          // Randomly pick candidate to balance load evenly among tied servers
-          const chosen = bestCandidates[Math.floor(Math.random() * bestCandidates.length)].sid;
-          joinServerSession(chosen);
-        }
+    (() => {
+      let storedId = localStorage.getItem("ai_client_id");
+      let storedSecret = localStorage.getItem("ai_client_secret");
+      if (!storedId) {
+        storedId = "client-" + Math.random().toString(36).substring(2, 10);
+        localStorage.setItem("ai_client_id", storedId);
       }
-    }
-
-    // Connect to WebSocket Broker with unique options
-    client = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
-      clientId: UNIQUE_CLIENT_ID,
-      clean: true,
-      keepalive: 30
-    });
-
-    client.on('connect', () => {
-      logToChat("Relay connected. Scanning background host servers...", "status");
-      client.subscribe(HEARTBEAT_TOPIC);
-    });
-
-    client.on('message', (topic, message) => {
-      try {
-        const payload = JSON.parse(message.toString());
-
-        if (topic === HEARTBEAT_TOPIC) {
-          if (payload && payload.serverId) {
-            discoveredServers[payload.serverId] = {
-              queueLength: payload.queueLength,
-              lastSeen: Date.now()
-            };
-            autoSelectBestServer();
-          }
-          return;
-        }
-
-        if (payload.requestId && payload.requestId === activeRequestId) {
-          if (payload.type === "QUEUED") {
-            resetRollingWatchdog();
-            if (currentAiBubble) currentAiBubble.innerText = `AI: ${payload.text}`;
-          }
-          else if (payload.type === "PROCESSING") {
-            resetRollingWatchdog();
-            if (currentAiBubble) currentAiBubble.innerText = "AI is generating...";
-          }
-          else if (payload.type === "CHUNK") {
-            resetRollingWatchdog();
-            if (currentAiBubble) currentAiBubble.innerText = "AI: " + payload.text;
-          } 
-          else if (payload.type === "RESPONSE_COMPLETE") {
-            if (currentAiBubble) currentAiBubble.innerText = "AI: " + payload.text;
-            clearWatchdog();
-            sendBtn.disabled = false;
-          }
-          else if (payload.type === "ERROR") {
-            if (currentAiBubble) currentAiBubble.innerText = "Error: " + payload.text;
-            clearWatchdog();
-            sendBtn.disabled = false;
-          }
-        }
-      } catch(e) { console.error("Error parsing response:", e); }
-    });
-
-    function joinServerSession(sessionId) {
-      if (activeResponseTopic) {
-        client.unsubscribe(activeResponseTopic);
+      if (!storedSecret) {
+        storedSecret = Math.random().toString(36).substring(2) + Date.now().toString(36);
+        localStorage.setItem("ai_client_secret", storedSecret);
       }
 
-      activeServerId = sessionId;
-      activeResponseTopic = `ai-chat/${sessionId}/response/${UNIQUE_CLIENT_ID}`;
-      
-      client.subscribe(activeResponseTopic, (err) => {
-        if (!err) {
-          serverStatus.innerHTML = `Connected Server: <b class="success">${sessionId}</b>`;
-          sendBtn.disabled = false;
+      const UNIQUE_CLIENT_ID = storedId;
+      const AUTH_KEY = storedSecret;
+      document.getElementById("clientBadge").innerText = `ID: ${UNIQUE_CLIENT_ID}`;
+
+      const chat = document.getElementById("chat");
+      const msgInput = document.getElementById("msgInput");
+      const sendBtn = document.getElementById("sendBtn");
+      const serverStatus = document.getElementById("serverStatus");
+
+      let client = null;
+      let activeServerId = "";
+      let activeResponseTopic = "";
+      let currentAiBubble = null;
+      let activeRequestId = null;
+      let watchdogTimer = null;
+      let isConnected = false;
+
+      let targetStreamText = "";
+      let displayedStreamText = "";
+      let renderAnimFrame = null;
+
+      const HEARTBEAT_TOPIC = "ai-chat/servers/heartbeat";
+      const discoveredServers = {};
+
+      function logToChat(msg, className = "status") {
+        const div = document.createElement("div");
+        div.className = className;
+        div.innerHTML = msg;
+        chat.appendChild(div);
+        chat.scrollTop = chat.scrollHeight;
+      }
+
+      function updateStreamRender() {
+        if (displayedStreamText.length < targetStreamText.length) {
+          const step = Math.max(1, Math.floor((targetStreamText.length - displayedStreamText.length) / 2));
+          displayedStreamText += targetStreamText.substring(displayedStreamText.length, displayedStreamText.length + step);
+          if (currentAiBubble) {
+            currentAiBubble.innerText = "AI: " + displayedStreamText;
+            chat.scrollTop = chat.scrollHeight;
+          }
         }
-      });
-    }
+        renderAnimFrame = requestAnimationFrame(updateStreamRender);
+      }
 
-    function sendPrompt() {
-      const text = msgInput.value.trim();
-      if (!text || !activeServerId) return;
+      function startStreamRender() {
+        if (!renderAnimFrame) renderAnimFrame = requestAnimationFrame(updateStreamRender);
+      }
 
-      activeRequestId = "req-" + Date.now();
-      logToChat(`<b>You:</b> ${text}`, "");
-      
-      currentAiBubble = document.createElement("div");
-      currentAiBubble.style.color = "#4ade80";
-      currentAiBubble.innerText = "AI: Sending request to server...";
-      chat.appendChild(currentAiBubble);
-      chat.scrollTop = chat.scrollHeight;
+      function stopStreamRender() {
+        if (renderAnimFrame) {
+          cancelAnimationFrame(renderAnimFrame);
+          renderAnimFrame = null;
+        }
+      }
 
-      const promptTopic = `ai-chat/${activeServerId}/prompt`;
-      
-      client.publish(promptTopic, JSON.stringify({
+      function resetWatchdog() {
+        if (watchdogTimer) clearTimeout(watchdogTimer);
+        watchdogTimer = setTimeout(() => {
+          if (activeRequestId) {
+            logToChat("Request stalled (No activity for 45s).", "error");
+            if (currentAiBubble) currentAiBubble.innerText = "Error: Stream timeout.";
+            clearWatchdog();
+            sendBtn.disabled = !isConnected || !activeServerId;
+          }
+        }, 45000);
+      }
+
+      function clearWatchdog() {
+        if (watchdogTimer) clearTimeout(watchdogTimer);
+        watchdogTimer = null;
+        stopStreamRender();
+        currentAiBubble = null;
+        activeRequestId = null;
+        targetStreamText = "";
+        displayedStreamText = "";
+      }
+
+      function autoSelectBestServer() {
+        const now = Date.now();
+        const healthyServers = [];
+        let minQueue = 999;
+
+        Object.keys(discoveredServers).forEach(sid => {
+          const s = discoveredServers[sid];
+          if (now - s.lastSeen < 6000) {
+            if (s.queueLength < minQueue) minQueue = s.queueLength;
+            healthyServers.push({ sid, queueLength: s.queueLength });
+          }
+        });
+
+        const bestCandidates = healthyServers.filter(s => s.queueLength === minQueue);
+        if (bestCandidates.length > 0) {
+          const currentIsOptimal = bestCandidates.some(c => c.sid === activeServerId);
+          if (!currentIsOptimal) {
+            const chosen = bestCandidates[Math.floor(Math.random() * bestCandidates.length)].sid;
+            joinServerSession(chosen);
+          }
+        }
+      }
+
+      client = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
         clientId: UNIQUE_CLIENT_ID,
-        text: text,
-        requestId: activeRequestId
-      }));
-      
-      msgInput.value = "";
-      sendBtn.disabled = true;
+        clean: false,
+        keepalive: 15,
+        reconnectPeriod: 2000,
+        connectTimeout: 10000
+      });
 
-      resetRollingWatchdog();
-    }
+      client.on('connect', () => {
+        isConnected = true;
+        serverStatus.innerText = "Scanning host servers...";
+        client.subscribe(HEARTBEAT_TOPIC);
+        if (activeResponseTopic) client.subscribe(activeResponseTopic);
+      });
 
-    sendBtn.addEventListener("click", sendPrompt);
-    msgInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !sendBtn.disabled) sendPrompt();
-    });
+      client.on('reconnect', () => {
+        serverStatus.innerText = "Reconnecting relay...";
+      });
+
+      client.on('offline', () => {
+        isConnected = false;
+        serverStatus.innerText = "Relay Offline";
+        sendBtn.disabled = true;
+      });
+
+      client.on('message', (topic, message) => {
+        try {
+          const payload = JSON.parse(message.toString());
+
+          if (topic === HEARTBEAT_TOPIC) {
+            if (payload && payload.serverId) {
+              discoveredServers[payload.serverId] = {
+                queueLength: payload.queueLength,
+                lastSeen: Date.now()
+              };
+              autoSelectBestServer();
+            }
+            return;
+          }
+
+          if (payload.requestId && payload.requestId === activeRequestId) {
+            if (payload.type === "QUEUED") {
+              resetWatchdog();
+              if (currentAiBubble) currentAiBubble.innerText = `AI: ${payload.text}`;
+            }
+            else if (payload.type === "PROCESSING") {
+              resetWatchdog();
+              if (currentAiBubble) currentAiBubble.innerText = "AI is generating...";
+            }
+            else if (payload.type === "CHUNK") {
+              resetWatchdog();
+              targetStreamText = payload.text;
+              startStreamRender();
+            } 
+            else if (payload.type === "RESPONSE_COMPLETE") {
+              stopStreamRender();
+              if (currentAiBubble) currentAiBubble.innerText = "AI: " + payload.text;
+              clearWatchdog();
+              sendBtn.disabled = false;
+            }
+            else if (payload.type === "ERROR") {
+              stopStreamRender();
+              if (currentAiBubble) currentAiBubble.innerText = "Error: " + payload.text;
+              clearWatchdog();
+              sendBtn.disabled = false;
+            }
+          }
+        } catch(e) {}
+      });
+
+      function joinServerSession(sessionId) {
+        if (activeResponseTopic && client) client.unsubscribe(activeResponseTopic);
+        activeServerId = sessionId;
+        activeResponseTopic = `ai-chat/${sessionId}/response/${UNIQUE_CLIENT_ID}`;
+        
+        client.subscribe(activeResponseTopic, (err) => {
+          if (!err) {
+            serverStatus.innerHTML = `Connected: <b class="success">${sessionId}</b>`;
+            if (!activeRequestId) sendBtn.disabled = false;
+          }
+        });
+      }
+
+      function sendPrompt() {
+        const text = msgInput.value.trim();
+        if (!text || !activeServerId || !isConnected) return;
+
+        activeRequestId = "req-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6);
+        targetStreamText = "";
+        displayedStreamText = "";
+
+        logToChat(`<b>You:</b> ${text}`, "msg-user");
+        
+        currentAiBubble = document.createElement("div");
+        currentAiBubble.className = "msg-ai";
+        currentAiBubble.innerText = "AI: Requesting...";
+        chat.appendChild(currentAiBubble);
+        chat.scrollTop = chat.scrollHeight;
+
+        const promptTopic = `ai-chat/${activeServerId}/prompt`;
+        
+        client.publish(promptTopic, JSON.stringify({
+          clientId: UNIQUE_CLIENT_ID,
+          authKey: AUTH_KEY,
+          text: text,
+          requestId: activeRequestId,
+          ts: Date.now()
+        }), { qos: 1 });
+        
+        msgInput.value = "";
+        sendBtn.disabled = true;
+        resetWatchdog();
+      }
+
+      sendBtn.addEventListener("click", sendPrompt);
+      msgInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !sendBtn.disabled) sendPrompt();
+      });
+    })();
   </script>
 </body>
 </html>
