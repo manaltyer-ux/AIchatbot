@@ -46,20 +46,23 @@
 
   <script>
     (() => {
-      let storedId = localStorage.getItem("ai_client_id");
+      let storedUser = localStorage.getItem("ai_user_id");
       let storedSecret = localStorage.getItem("ai_client_secret");
-      if (!storedId) {
-        storedId = "client-" + Math.random().toString(36).substring(2, 10);
-        localStorage.setItem("ai_client_id", storedId);
+      if (!storedUser) {
+        storedUser = "usr-" + Math.random().toString(36).substring(2, 8);
+        localStorage.setItem("ai_user_id", storedUser);
       }
       if (!storedSecret) {
         storedSecret = Math.random().toString(36).substring(2) + Date.now().toString(36);
         localStorage.setItem("ai_client_secret", storedSecret);
       }
 
-      const UNIQUE_CLIENT_ID = storedId;
+      const TAB_ID = Math.random().toString(36).substring(2, 6);
+      const LOGICAL_CLIENT_ID = `${storedUser}-${TAB_ID}`;
+      const MQTT_CLIENT_ID = `client-${LOGICAL_CLIENT_ID}`;
       const AUTH_KEY = storedSecret;
-      document.getElementById("clientBadge").innerText = `ID: ${UNIQUE_CLIENT_ID}`;
+
+      document.getElementById("clientBadge").innerText = `ID: ${LOGICAL_CLIENT_ID}`;
 
       const chat = document.getElementById("chat");
       const msgInput = document.getElementById("msgInput");
@@ -135,31 +138,42 @@
       }
 
       function autoSelectBestServer() {
+        if (activeRequestId) return;
+
         const now = Date.now();
         const healthyServers = [];
-        let minQueue = 999;
 
         Object.keys(discoveredServers).forEach(sid => {
           const s = discoveredServers[sid];
-          if (now - s.lastSeen < 6000) {
-            if (s.queueLength < minQueue) minQueue = s.queueLength;
-            healthyServers.push({ sid, queueLength: s.queueLength });
+          if (now - s.lastSeen < 12000) {
+            healthyServers.push({ sid, queueLength: s.queueLength, isProcessing: s.isProcessing });
           }
         });
 
-        const bestCandidates = healthyServers.filter(s => s.queueLength === minQueue);
-        if (bestCandidates.length > 0) {
-          const currentIsOptimal = bestCandidates.some(c => c.sid === activeServerId);
-          if (!currentIsOptimal) {
-            const chosen = bestCandidates[Math.floor(Math.random() * bestCandidates.length)].sid;
+        if (healthyServers.length === 0) return;
+
+        const idleServers = healthyServers.filter(s => !s.isProcessing && s.queueLength === 0);
+        let candidates = [];
+
+        if (idleServers.length > 0) {
+          candidates = idleServers;
+        } else {
+          let minQueue = Math.min(...healthyServers.map(s => s.queueLength));
+          candidates = healthyServers.filter(s => s.queueLength === minQueue);
+        }
+
+        if (candidates.length > 0) {
+          const currentIsCandidate = candidates.some(c => c.sid === activeServerId);
+          if (!currentIsCandidate) {
+            const chosen = candidates[Math.floor(Math.random() * candidates.length)].sid;
             joinServerSession(chosen);
           }
         }
       }
 
       client = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
-        clientId: UNIQUE_CLIENT_ID,
-        clean: false,
+        clientId: MQTT_CLIENT_ID,
+        clean: true,
         keepalive: 15,
         reconnectPeriod: 2000,
         connectTimeout: 10000
@@ -190,6 +204,7 @@
             if (payload && payload.serverId) {
               discoveredServers[payload.serverId] = {
                 queueLength: payload.queueLength,
+                isProcessing: payload.isProcessing,
                 lastSeen: Date.now()
               };
               autoSelectBestServer();
@@ -230,7 +245,7 @@
       function joinServerSession(sessionId) {
         if (activeResponseTopic && client) client.unsubscribe(activeResponseTopic);
         activeServerId = sessionId;
-        activeResponseTopic = `ai-chat/${sessionId}/response/${UNIQUE_CLIENT_ID}`;
+        activeResponseTopic = `ai-chat/${sessionId}/response/${LOGICAL_CLIENT_ID}`;
         
         client.subscribe(activeResponseTopic, (err) => {
           if (!err) {
@@ -259,7 +274,7 @@
         const promptTopic = `ai-chat/${activeServerId}/prompt`;
         
         client.publish(promptTopic, JSON.stringify({
-          clientId: UNIQUE_CLIENT_ID,
+          clientId: LOGICAL_CLIENT_ID,
           authKey: AUTH_KEY,
           text: text,
           requestId: activeRequestId,
