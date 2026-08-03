@@ -50,7 +50,7 @@
       chat.scrollTop = chat.scrollHeight;
     }
 
-    // Include Google STUN servers to guarantee traversal through routers/firewalls
+    // Initialize PeerJS with public Google STUN servers for WebRTC firewall traversal
     const peer = new Peer({
       debug: 2,
       config: {
@@ -66,7 +66,7 @@
       console.log("Client local peer ID:", id);
       connectBtn.innerText = "Connect to Session";
       connectBtn.disabled = false;
-      logToChat("Client peer initialized. Ready to connect to host.", "status");
+      logToChat("Client peer initialized. Ready to connect.", "status");
     });
 
     peer.on("error", (err) => {
@@ -81,7 +81,7 @@
       if (!targetId) return alert("Enter target Session ID!");
 
       if (!peer.id) {
-        return alert("Client PeerJS is still connecting to the server. Please wait a second.");
+        return alert("Client PeerJS is still initializing. Please wait a moment.");
       }
 
       logToChat(`Initiating connection to target: <b>${targetId}</b>...`);
@@ -89,10 +89,10 @@
 
       if (conn) conn.close();
 
-      // Connect to host peer
+      // Establish P2P Connection
       conn = peer.connect(targetId);
 
-      // Handshake complete
+      // WebRTC Handshake Completed
       conn.on("open", () => {
         logToChat(`Connected to Session: ${targetId}`, "success");
         sendBtn.disabled = false;
