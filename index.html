@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Humanoid AI</title>
+  <title>GitHub Pages Remote Client</title>
   <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
   <style>
     * { box-sizing: border-box; }
@@ -29,7 +29,7 @@
 
   <div id="container">
     <div id="header">
-      <h2>Humanoid AI</h2>
+      <h2>GitHub Client</h2>
       <div>
         <span id="serverStatus">Connecting...</span>
         <span class="client-badge" id="clientBadge">ID: Initializing...</span>
@@ -76,6 +76,7 @@
       let activeRequestId = null;
       let watchdogTimer = null;
       let isConnected = false;
+      let reconnectStallTimer = null;
 
       let targetStreamText = "";
       let displayedStreamText = "";
@@ -145,10 +146,18 @@
 
         Object.keys(discoveredServers).forEach(sid => {
           const s = discoveredServers[sid];
-          if (now - s.lastSeen < 12000) {
+          if (now - s.lastSeen < 10000) {
             healthyServers.push({ sid, queueLength: s.queueLength, isProcessing: s.isProcessing });
+          } else {
+            delete discoveredServers[sid];
           }
         });
+
+        if (activeServerId && !discoveredServers[activeServerId]) {
+          activeServerId = "";
+          serverStatus.innerHTML = `<span class="error">Server Disconnected. Scanning...</span>`;
+          sendBtn.disabled = true;
+        }
 
         if (healthyServers.length === 0) return;
 
@@ -171,88 +180,113 @@
         }
       }
 
-      client = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
-        clientId: MQTT_CLIENT_ID,
-        clean: true,
-        keepalive: 15,
-        reconnectPeriod: 2000,
-        connectTimeout: 10000
-      });
+      function initMqttClient() {
+        if (client) {
+          try { client.end(true); } catch(e) {}
+          client = null;
+        }
 
-      client.on('connect', () => {
-        isConnected = true;
-        serverStatus.innerText = "Scanning host servers...";
-        client.subscribe(HEARTBEAT_TOPIC);
-        if (activeResponseTopic) client.subscribe(activeResponseTopic);
-      });
-
-      client.on('reconnect', () => {
-        serverStatus.innerText = "Reconnecting relay...";
-      });
-
-      client.on('offline', () => {
         isConnected = false;
-        serverStatus.innerText = "Relay Offline";
         sendBtn.disabled = true;
-      });
+        serverStatus.innerText = "Connecting relay...";
 
-      client.on('message', (topic, message) => {
-        try {
-          const payload = JSON.parse(message.toString());
+        client = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
+          clientId: MQTT_CLIENT_ID,
+          clean: true,
+          keepalive: 15,
+          reconnectPeriod: 2000,
+          connectTimeout: 8000
+        });
 
-          if (topic === HEARTBEAT_TOPIC) {
-            if (payload && payload.serverId) {
-              discoveredServers[payload.serverId] = {
-                queueLength: payload.queueLength,
-                isProcessing: payload.isProcessing,
-                lastSeen: Date.now()
-              };
-              autoSelectBestServer();
-            }
-            return;
+        client.on('connect', () => {
+          isConnected = true;
+          if (reconnectStallTimer) {
+            clearTimeout(reconnectStallTimer);
+            reconnectStallTimer = null;
           }
+          serverStatus.innerText = "Scanning host servers...";
+          client.subscribe(HEARTBEAT_TOPIC);
+          if (activeServerId) joinServerSession(activeServerId);
+        });
 
-          if (payload.requestId && payload.requestId === activeRequestId) {
-            if (payload.type === "QUEUED") {
-              resetWatchdog();
-              if (currentAiBubble) currentAiBubble.innerText = `AI: ${payload.text}`;
-            }
-            else if (payload.type === "PROCESSING") {
-              resetWatchdog();
-              if (currentAiBubble) currentAiBubble.innerText = "AI is generating...";
-            }
-            else if (payload.type === "CHUNK") {
-              resetWatchdog();
-              targetStreamText = payload.text;
-              startStreamRender();
-            } 
-            else if (payload.type === "RESPONSE_COMPLETE") {
-              stopStreamRender();
-              if (currentAiBubble) currentAiBubble.innerText = "AI: " + payload.text;
-              clearWatchdog();
-              sendBtn.disabled = false;
-            }
-            else if (payload.type === "ERROR") {
-              stopStreamRender();
-              if (currentAiBubble) currentAiBubble.innerText = "Error: " + payload.text;
-              clearWatchdog();
-              sendBtn.disabled = false;
-            }
+        client.on('reconnect', () => {
+          serverStatus.innerText = "Reconnecting relay...";
+          if (!reconnectStallTimer) {
+            reconnectStallTimer = setTimeout(() => {
+              reconnectStallTimer = null;
+              initMqttClient();
+            }, 10000);
           }
-        } catch(e) {}
-      });
+        });
+
+        client.on('offline', () => {
+          isConnected = false;
+          serverStatus.innerText = "Relay Offline";
+          sendBtn.disabled = true;
+        });
+
+        client.on('message', (topic, message) => {
+          try {
+            const payload = JSON.parse(message.toString());
+
+            if (topic === HEARTBEAT_TOPIC) {
+              if (payload && payload.serverId) {
+                discoveredServers[payload.serverId] = {
+                  queueLength: payload.queueLength,
+                  isProcessing: payload.isProcessing,
+                  lastSeen: Date.now()
+                };
+                autoSelectBestServer();
+              }
+              return;
+            }
+
+            if (payload.requestId && payload.requestId === activeRequestId) {
+              if (payload.type === "QUEUED") {
+                resetWatchdog();
+                if (currentAiBubble) currentAiBubble.innerText = `AI: ${payload.text}`;
+              }
+              else if (payload.type === "PROCESSING") {
+                resetWatchdog();
+                if (currentAiBubble) currentAiBubble.innerText = "AI is generating...";
+              }
+              else if (payload.type === "CHUNK") {
+                resetWatchdog();
+                targetStreamText = payload.text;
+                startStreamRender();
+              } 
+              else if (payload.type === "RESPONSE_COMPLETE") {
+                stopStreamRender();
+                if (currentAiBubble) currentAiBubble.innerText = "AI: " + payload.text;
+                clearWatchdog();
+                sendBtn.disabled = false;
+              }
+              else if (payload.type === "ERROR") {
+                stopStreamRender();
+                if (currentAiBubble) currentAiBubble.innerText = "Error: " + payload.text;
+                clearWatchdog();
+                sendBtn.disabled = false;
+              }
+            }
+          } catch(e) {}
+        });
+      }
 
       function joinServerSession(sessionId) {
-        if (activeResponseTopic && client) client.unsubscribe(activeResponseTopic);
+        if (activeResponseTopic && client && isConnected) {
+          try { client.unsubscribe(activeResponseTopic); } catch(e) {}
+        }
         activeServerId = sessionId;
         activeResponseTopic = `ai-chat/${sessionId}/response/${LOGICAL_CLIENT_ID}`;
         
-        client.subscribe(activeResponseTopic, (err) => {
-          if (!err) {
-            serverStatus.innerHTML = `Connected: <b class="success">${sessionId}</b>`;
-            if (!activeRequestId) sendBtn.disabled = false;
-          }
-        });
+        if (client && isConnected) {
+          client.subscribe(activeResponseTopic, (err) => {
+            if (!err) {
+              serverStatus.innerHTML = `Connected: <b class="success">${sessionId}</b>`;
+              if (!activeRequestId) sendBtn.disabled = false;
+            }
+          });
+        }
       }
 
       function sendPrompt() {
@@ -286,10 +320,26 @@
         resetWatchdog();
       }
 
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") {
+          if (!client || !client.connected) {
+            initMqttClient();
+          } else {
+            autoSelectBestServer();
+          }
+        }
+      });
+
+      window.addEventListener("online", () => initMqttClient());
+
+      setInterval(autoSelectBestServer, 3000);
+
       sendBtn.addEventListener("click", sendPrompt);
       msgInput.addEventListener("keydown", (e) => {
         if (e.key === "Enter" && !sendBtn.disabled) sendPrompt();
       });
+
+      initMqttClient();
     })();
   </script>
 </body>
