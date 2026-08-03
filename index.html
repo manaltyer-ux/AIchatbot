@@ -8,7 +8,7 @@
     body { font-family: system-ui, sans-serif; background: #0f172a; color: #fff; padding: 20px; }
     #chat { border: 1px solid #334155; height: 350px; padding: 10px; overflow-y: auto; margin-bottom: 10px; border-radius: 8px; background: #1e293b; }
     input, button { padding: 10px; font-size: 14px; border-radius: 6px; }
-    input { width: 300px; background: #0f172a; color: #fff; border: 1px solid #334155; }
+    input { width: 320px; background: #0f172a; color: #fff; border: 1px solid #334155; }
     button { background: #2563eb; color: white; border: none; cursor: pointer; font-weight: bold; }
     button:disabled { opacity: 0.4; cursor: not-allowed; }
     .status { color: #38bdf8; font-style: italic; margin: 4px 0; }
@@ -22,7 +22,7 @@
   
   <div>
     <label>Target Session ID:</label>
-    <input type="text" id="targetSessionId" placeholder="e.g. ai-session-x9k2p1">
+    <input type="text" id="targetSessionId" placeholder="e.g. ai-session-host-1234">
     <button id="connectBtn" disabled>Initializing...</button>
   </div>
 
@@ -41,6 +41,7 @@
 
     let conn = null;
     let currentAiBubble = null;
+    let connectTimeout = null;
 
     function logToChat(msg, className = "status") {
       const div = document.createElement("div");
@@ -50,28 +51,27 @@
       chat.scrollTop = chat.scrollHeight;
     }
 
-    // Initialize PeerJS with public Google STUN servers for WebRTC firewall traversal
+    // Initialize PeerJS Client
     const peer = new Peer({
       debug: 2,
       config: {
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun2.l.google.com:19302' }
+          { urls: 'stun:stun1.l.google.com:19302' }
         ]
       }
     });
 
     peer.on("open", (id) => {
-      console.log("Client local peer ID:", id);
+      console.log("Client peer ID:", id);
       connectBtn.innerText = "Connect to Session";
       connectBtn.disabled = false;
-      logToChat("Client peer initialized. Ready to connect.", "status");
+      logToChat("Client ready. Enter Target Session ID from Host site.", "status");
     });
 
     peer.on("error", (err) => {
       console.error("PeerJS Client Error:", err);
-      logToChat(`Client Peer Error (${err.type}): ${err.message}`, "error");
+      logToChat(`Client Error (${err.type}): ${err.message}`, "error");
       connectBtn.disabled = false;
       connectBtn.innerText = "Connect to Session";
     });
@@ -80,21 +80,28 @@
       const targetId = targetSessionInput.value.trim();
       if (!targetId) return alert("Enter target Session ID!");
 
-      if (!peer.id) {
-        return alert("Client PeerJS is still initializing. Please wait a moment.");
-      }
-
       logToChat(`Initiating connection to target: <b>${targetId}</b>...`);
       connectBtn.disabled = true;
 
       if (conn) conn.close();
 
-      // Establish P2P Connection
+      // Create Connection
       conn = peer.connect(targetId);
 
-      // WebRTC Handshake Completed
+      // Timeout Safety Check (10 seconds)
+      if (connectTimeout) clearTimeout(connectTimeout);
+      connectTimeout = setTimeout(() => {
+        if (!conn || !conn.open) {
+          logToChat("<b>Connection Timed Out!</b> Could not reach host. Check that:<br>1. Host page is open in browser.<br>2. Session ID matches exactly.<br>3. Both sites use HTTPS (or both on local dev).", "error");
+          connectBtn.disabled = false;
+          connectBtn.innerText = "Retry Connection";
+        }
+      }, 10000);
+
+      // Connection opened successfully
       conn.on("open", () => {
-        logToChat(`Connected to Session: ${targetId}`, "success");
+        if (connectTimeout) clearTimeout(connectTimeout);
+        logToChat(`Successfully Connected to Session: ${targetId}`, "success");
         sendBtn.disabled = false;
         connectBtn.disabled = false;
         connectBtn.innerText = "Re-Connect";
@@ -117,12 +124,14 @@
       });
 
       conn.on("error", (err) => {
+        if (connectTimeout) clearTimeout(connectTimeout);
         logToChat(`Connection error: ${err}`, "error");
         sendBtn.disabled = true;
         connectBtn.disabled = false;
       });
 
       conn.on("close", () => {
+        if (connectTimeout) clearTimeout(connectTimeout);
         logToChat(`Disconnected from Host.`, "error");
         sendBtn.disabled = true;
         connectBtn.disabled = false;
