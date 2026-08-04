@@ -4,7 +4,7 @@
   const DEACTIVATE_TOPIC = "xaida/servers/deactivate";
   const PING_TOPIC = "xaida/servers/ping";
   const SERVER_TIMEOUT_MS = 12000; 
-  const WATCHDOG_TIMEOUT_MS = 5000; // Max time allowed in 'reconnecting' state before hard reset
+  const WATCHDOG_TIMEOUT_MS = 5000; 
 
   function createWorkerInterval(fn, ms) {
     try {
@@ -219,7 +219,6 @@
     joinServer(candidates[Math.floor(Math.random() * candidates.length)].serverId);
   }
 
-  // Fully tears down old connection instance to prevent ghost/zombie websockets
   function cleanupRelay() {
     if (watchdogTimer) {
       clearTimeout(watchdogTimer);
@@ -229,7 +228,7 @@
     if (relayClient) {
       try {
         relayClient.removeAllListeners();
-        relayClient.end(true); // Force close without waiting for acknowledgement
+        relayClient.end(true);
       } catch (e) {}
       relayClient = null;
     }
@@ -250,7 +249,6 @@
     cleanupRelay();
     reportStatus("Connecting...", "waiting");
 
-    // Dynamic connection identifier forces the broker to drop any frozen ghost session instantly
     const dynamicMqttClientId = "xaida-" + logicalClientId + "-" + Math.random().toString(36).substring(2, 6);
 
     relayClient = mqtt.connect(BROKER_URL, {
@@ -261,7 +259,6 @@
       connectTimeout: 6000
     });
 
-    // Reset Watchdog: If connection is taking too long, blow it away and retry hard
     watchdogTimer = setTimeout(function () {
       if (!relayIsConnected) {
         forceReconnect();
@@ -286,7 +283,6 @@
     relayClient.on("reconnect", function () {
       reportStatus("Reconnecting...", "waiting");
       
-      // If stuck reconnecting longer than WATCHDOG_TIMEOUT_MS, hard restart
       if (!watchdogTimer) {
         watchdogTimer = setTimeout(function () {
           forceReconnect();
@@ -344,13 +340,11 @@
     });
   }
 
-  // Main Background / Sleep Watchdog Loop
   createWorkerInterval(function () {
     const now = Date.now();
     const timePassed = now - lastActiveTimestamp;
     lastActiveTimestamp = now;
 
-    // Detect OS sleep / frozen tab: if gap > 4 seconds, force clean reconnect
     if (timePassed > 4000) {
       forceReconnect();
       return;
@@ -364,7 +358,6 @@
     pickBestServer();
   }, 2000);
 
-  // Resume Connection logic whenever page becomes active
   function handleResume() {
     const now = Date.now();
     if (!relayClient || !relayIsConnected || (now - lastActiveTimestamp > 3000)) {
