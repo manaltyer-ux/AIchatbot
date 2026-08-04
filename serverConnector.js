@@ -3,6 +3,19 @@
   const HEARTBEAT_TOPIC = "xaida/servers/heartbeat";
   const PING_TOPIC = "xaida/servers/ping";
 
+  // Web Worker timer to prevent background tab throttling
+  function createWorkerInterval(fn, ms) {
+    try {
+      const blob = new Blob([`self.onmessage=function(){setInterval(function(){postMessage(0);},${ms});};`], { type: 'text/javascript' });
+      const worker = new Worker(URL.createObjectURL(blob));
+      worker.onmessage = fn;
+      worker.postMessage(0);
+      return worker;
+    } catch (e) {
+      return setInterval(fn, ms);
+    }
+  }
+
   let storedUserId = localStorage.getItem("xaida_user_id");
   if (!storedUserId) {
     storedUserId = "usr-" + Math.random().toString(36).substring(2, 8);
@@ -126,9 +139,10 @@
     const now = Date.now();
     const healthyServers = [];
 
+    // Increase staleness timeout to 75s to keep connections healthy in background tabs
     Object.keys(discoveredServers).forEach(function (serverId) {
       const serverInfo = discoveredServers[serverId];
-      if (now - serverInfo.lastSeen > 12000) {
+      if (now - serverInfo.lastSeen > 75000) {
         delete discoveredServers[serverId];
         return;
       }
@@ -184,7 +198,7 @@
     relayClient = mqtt.connect(BROKER_URL, {
       clientId: "xaida-client-" + logicalClientId,
       clean: true,
-      keepalive: 15,
+      keepalive: 30,
       reconnectPeriod: 2000,
       connectTimeout: 8000
     });
@@ -240,7 +254,7 @@
     });
   }
 
-  setInterval(pickBestServer, 2000);
+  createWorkerInterval(pickBestServer, 2000);
 
   document.addEventListener("visibilitychange", function () {
     if (document.visibilityState !== "visible") return;
