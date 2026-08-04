@@ -76,10 +76,12 @@
       row.appendChild(referenceImage);
     }
 
-    const bubble = document.createElement("div");
-    bubble.className = "bubble-user";
-    bubble.textContent = userText;
-    row.appendChild(bubble);
+    if (userText) {
+      const bubble = document.createElement("div");
+      bubble.className = "bubble-user";
+      bubble.textContent = userText;
+      row.appendChild(bubble);
+    }
 
     chatBox.appendChild(row);
     scrollChatToBottom();
@@ -173,7 +175,10 @@
     if (stallTimer) clearTimeout(stallTimer);
     stallTimer = setTimeout(function () {
       if (!activeRequestId) return;
-      addNoteLine("Request timed out (No response activity for 45s).", true);
+      if (activeAiBubble) {
+        activeAiBubble.textContent = "Error: Request timed out (No response activity for 45s).";
+      }
+      addNoteLine("Request timed out.", true);
       finishRequest();
     }, 45000);
   }
@@ -188,8 +193,17 @@
   }
 
   function refreshSendAvailability() {
-    if (!sendButton) return;
-    sendButton.disabled = !window.XaidaConnector || !window.XaidaConnector.isReady() || activeRequestId !== null;
+    const isBusy = activeRequestId !== null;
+    if (sendButton) {
+      sendButton.disabled = !window.XaidaConnector || !window.XaidaConnector.isReady() || isBusy;
+    }
+
+    const modelSwitchBtn = document.getElementById("modelSwitchButton");
+    if (modelSwitchBtn) {
+      modelSwitchBtn.disabled = isBusy;
+      modelSwitchBtn.style.opacity = isBusy ? "0.5" : "1";
+      modelSwitchBtn.style.pointerEvents = isBusy ? "none" : "auto";
+    }
   }
 
   function clearAttachment() {
@@ -200,22 +214,25 @@
 
   function sendCurrentMessage() {
     const userText = messageInput.value.trim();
-    if (!userText || activeRequestId || !window.XaidaConnector || !window.XaidaConnector.isReady()) return;
+    if ((!userText && !attachedImageDataUrl) || activeRequestId || !window.XaidaConnector || !window.XaidaConnector.isReady()) return;
 
     activeRequestId = "req-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6);
     streamedMarkdown = "";
+
+    const selectedModel = window.XaidaConnector.getSelectedModel();
+    const promptTextToSend = userText || (selectedModel === "xaida-vision-1.1" ? "Generate an image based on this reference" : "Please analyze this image");
 
     addUserRow(userText, attachedImageDataUrl);
     activeAiBubble = addAiBubble();
 
     const wasSent = window.XaidaConnector.sendPrompt({
-      text: userText,
+      text: promptTextToSend,
       imageDataUrl: attachedImageDataUrl,
       requestId: activeRequestId
     });
 
     if (!wasSent) {
-      activeAiBubble.textContent = "Could not reach the server.";
+      if (activeAiBubble) activeAiBubble.textContent = "Error: Could not reach the server.";
       finishRequest();
       return;
     }
@@ -258,22 +275,47 @@
         return;
       }
 
+      // HIDE GENERATED IMAGE BEHIND A BUTTON FOR VISION MODEL
       if (payload.type === "IMAGE") {
         resetStallTimer();
         if (activeAiBubble) {
           activeAiBubble.dataset.isImage = "true";
           activeAiBubble.innerHTML = "";
+
+          const imageContainer = document.createElement("div");
+          imageContainer.className = "image-result-container";
+
+          const toggleBtn = document.createElement("button");
+          toggleBtn.className = "view-image-button";
+          toggleBtn.type = "button";
+          toggleBtn.textContent = "📷 View Generated Image";
+
           const generatedImage = document.createElement("img");
           generatedImage.className = "generated-image";
           generatedImage.src = payload.imageUrl;
           generatedImage.alt = payload.caption || "Generated Image";
-          activeAiBubble.appendChild(generatedImage);
+          generatedImage.style.display = "none";
+
+          toggleBtn.addEventListener("click", function () {
+            const isHidden = generatedImage.style.display === "none";
+            generatedImage.style.display = isHidden ? "block" : "none";
+            toggleBtn.textContent = isHidden ? "🙈 Hide Generated Image" : "📷 View Generated Image";
+            scrollChatToBottom();
+          });
+
+          imageContainer.appendChild(toggleBtn);
+          imageContainer.appendChild(generatedImage);
+
           if (payload.caption) {
             const captionLine = document.createElement("p");
             captionLine.style.marginTop = "8px";
+            captionLine.style.fontSize = "13px";
+            captionLine.style.color = "#8ba0b2";
             captionLine.textContent = payload.caption;
-            activeAiBubble.appendChild(captionLine);
+            imageContainer.appendChild(captionLine);
           }
+
+          activeAiBubble.appendChild(imageContainer);
           scrollChatToBottom();
         }
         return;
@@ -322,7 +364,6 @@
       const pickedFile = imageAttachInput.files && imageAttachInput.files[0];
       if (!pickedFile) return;
 
-
       compressImage(pickedFile, 800, 800, 0.7, function (compressedDataUrl) {
         attachedImageDataUrl = compressedDataUrl;
         attachmentThumb.src = attachedImageDataUrl;
@@ -336,6 +377,9 @@
   window.XaidaMessages = {
     addNoteLine: addNoteLine,
     refreshSendAvailability: refreshSendAvailability,
+    isRequestActive: function () {
+      return activeRequestId !== null;
+    },
     focusInput: function () {
       if (messageInput) messageInput.focus();
     }
