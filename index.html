@@ -3,344 +3,74 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Humanoid Ai</title>
+  <title>Xaida AI</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
   <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
-  <style>
-    * { box-sizing: border-box; }
-    body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #fff; padding: 20px; margin: 0; }
-    #container { max-width: 800px; margin: 0 auto; }
-    #header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; padding-bottom: 12px; margin-bottom: 15px; }
-    #chat { border: 1px solid #334155; height: 420px; padding: 14px; overflow-y: auto; margin-bottom: 12px; border-radius: 8px; background: #1e293b; display: flex; flex-direction: column; gap: 8px; }
-    #inputGroup { display: flex; gap: 8px; }
-    input { flex: 1; padding: 12px; font-size: 14px; border-radius: 6px; background: #0f172a; color: #fff; border: 1px solid #334155; outline: none; }
-    input:focus { border-color: #38bdf8; }
-    button { padding: 12px 20px; font-size: 14px; border-radius: 6px; background: #2563eb; color: white; border: none; cursor: pointer; font-weight: bold; }
-    button:disabled { opacity: 0.4; cursor: not-allowed; }
-    .status { color: #38bdf8; font-style: italic; font-size: 13px; }
-    .error { color: #f87171; font-weight: bold; font-size: 13px; }
-    .success { color: #4ade80; font-weight: bold; }
-    .client-badge { font-size: 12px; background: #334155; padding: 4px 8px; border-radius: 4px; color: #38bdf8; font-family: monospace; }
-    #serverStatus { font-size: 12px; color: #94a3b8; font-style: italic; }
-    .msg-user { color: #e2e8f0; background: #334155; padding: 8px 12px; border-radius: 6px; align-self: flex-end; max-width: 85%; }
-    .msg-ai { color: #4ade80; background: #0b1329; padding: 8px 12px; border-radius: 6px; align-self: flex-start; max-width: 85%; white-space: pre-wrap; word-break: break-word; }
-  </style>
 </head>
-<body>
+<body class="xaida-21-theme">
 
-  <div id="container">
-    <div id="header">
-      <h2>Humanoid Ai</h2>
-      <div>
-        <span id="serverStatus">Connecting...</span>
-        <span class="client-badge" id="clientBadge">ID: Initializing...</span>
+  <div id="appContainer">
+    
+    <div id="chatPage" class="page active">
+      <div class="topHeader">
+        <div class="modelTitleDisplay" id="currentModelDisplay">Xaida 2.1</div>
+        <button class="switchPageButton" id="openModelSelectorButton">Ai model button to switch</button>
+        <div class="serverStatusBadge" id="serverStatusBadge">SERVER: DISCONNECTED</div>
+      </div>
+
+      <div class="mainContentArea">
+        <div class="chatBoxWindow" id="chatMessageDisplay"></div>
+
+        <div class="inputBarContainer">
+          <input type="text" id="userInputField" placeholder="type message">
+          <label for="imageAttachmentInput" class="attachLabelButton">attach image</label>
+          <input type="file" id="imageAttachmentInput" accept="image/*">
+          <button id="sendMessageButton">send</button>
+        </div>
+
+        <div id="imagePreviewContainer" class="hidden">
+          <span id="imagePreviewName"></span>
+          <button id="removeImageButton">✕</button>
+        </div>
+
+        <div class="creatorCredit">Created by : booz</div>
       </div>
     </div>
 
-    <div id="chat"></div>
+    <div id="selectorPage" class="page">
+      <div class="topHeader">
+        <div class="modelTitleDisplay">Xaida AI</div>
+      </div>
 
-    <div id="inputGroup">
-      <input type="text" id="msgInput" placeholder="Enter prompt...">
-      <button id="sendBtn" disabled>Send</button>
+      <div class="selectorContentArea">
+        <div class="modelCard disabled">
+          <div class="cardHeader">Xaida 1.3</div>
+          <div class="cardDescription">Coming soon</div>
+        </div>
+
+        <div class="modelCard" id="selectXaida21Card">
+          <div class="cardHeader">Xaida 2.1</div>
+          <div class="cardDescription">
+            Great as an assiatnt for coding research writting paragraphs or homework assigenment a general assistant
+          </div>
+        </div>
+
+        <div class="modelCard" id="selectXaidaVisionCard">
+          <div class="cardHeader">Xaida Vision 1.1</div>
+          <div class="cardDescription">
+            Generating images features include : image to image generartion | text to image generation quality is potato though
+          </div>
+        </div>
+      </div>
     </div>
+
   </div>
 
-  <script>
-    (() => {
-      let storedUser = localStorage.getItem("ai_user_id");
-      let storedSecret = localStorage.getItem("ai_client_secret");
-      if (!storedUser) {
-        storedUser = "usr-" + Math.random().toString(36).substring(2, 8);
-        localStorage.setItem("ai_user_id", storedUser);
-      }
-      if (!storedSecret) {
-        storedSecret = Math.random().toString(36).substring(2) + Date.now().toString(36);
-        localStorage.setItem("ai_client_secret", storedSecret);
-      }
-
-      const TAB_ID = Math.random().toString(36).substring(2, 6);
-      const LOGICAL_CLIENT_ID = `${storedUser}-${TAB_ID}`;
-      const MQTT_CLIENT_ID = `client-${LOGICAL_CLIENT_ID}`;
-      const AUTH_KEY = storedSecret;
-
-      document.getElementById("clientBadge").innerText = `ID: ${LOGICAL_CLIENT_ID}`;
-
-      const chat = document.getElementById("chat");
-      const msgInput = document.getElementById("msgInput");
-      const sendBtn = document.getElementById("sendBtn");
-      const serverStatus = document.getElementById("serverStatus");
-
-      let client = null;
-      let activeServerId = "";
-      let activeResponseTopic = "";
-      let currentAiBubble = null;
-      let activeRequestId = null;
-      let watchdogTimer = null;
-      let isConnected = false;
-      let reconnectStallTimer = null;
-
-      let targetStreamText = "";
-      let displayedStreamText = "";
-      let renderAnimFrame = null;
-
-      const HEARTBEAT_TOPIC = "ai-chat/servers/heartbeat";
-      const discoveredServers = {};
-
-      function logToChat(msg, className = "status") {
-        const div = document.createElement("div");
-        div.className = className;
-        div.innerHTML = msg;
-        chat.appendChild(div);
-        chat.scrollTop = chat.scrollHeight;
-      }
-
-      function updateStreamRender() {
-        if (displayedStreamText.length < targetStreamText.length) {
-          const step = Math.max(1, Math.floor((targetStreamText.length - displayedStreamText.length) / 2));
-          displayedStreamText += targetStreamText.substring(displayedStreamText.length, displayedStreamText.length + step);
-          if (currentAiBubble) {
-            currentAiBubble.innerText = "AI: " + displayedStreamText;
-            chat.scrollTop = chat.scrollHeight;
-          }
-        }
-        renderAnimFrame = requestAnimationFrame(updateStreamRender);
-      }
-
-      function startStreamRender() {
-        if (!renderAnimFrame) renderAnimFrame = requestAnimationFrame(updateStreamRender);
-      }
-
-      function stopStreamRender() {
-        if (renderAnimFrame) {
-          cancelAnimationFrame(renderAnimFrame);
-          renderAnimFrame = null;
-        }
-      }
-
-      function resetWatchdog() {
-        if (watchdogTimer) clearTimeout(watchdogTimer);
-        watchdogTimer = setTimeout(() => {
-          if (activeRequestId) {
-            logToChat("Request stalled (No activity for 45s).", "error");
-            if (currentAiBubble) currentAiBubble.innerText = "Error: Stream timeout.";
-            clearWatchdog();
-            sendBtn.disabled = !isConnected || !activeServerId;
-          }
-        }, 45000);
-      }
-
-      function clearWatchdog() {
-        if (watchdogTimer) clearTimeout(watchdogTimer);
-        watchdogTimer = null;
-        stopStreamRender();
-        currentAiBubble = null;
-        activeRequestId = null;
-        targetStreamText = "";
-        displayedStreamText = "";
-      }
-
-      function autoSelectBestServer() {
-        if (activeRequestId) return;
-
-        const now = Date.now();
-        const healthyServers = [];
-
-        Object.keys(discoveredServers).forEach(sid => {
-          const s = discoveredServers[sid];
-          if (now - s.lastSeen < 10000) {
-            healthyServers.push({ sid, queueLength: s.queueLength, isProcessing: s.isProcessing });
-          } else {
-            delete discoveredServers[sid];
-          }
-        });
-
-        if (activeServerId && !discoveredServers[activeServerId]) {
-          activeServerId = "";
-          serverStatus.innerHTML = `<span class="error">Server Disconnected. Scanning...</span>`;
-          sendBtn.disabled = true;
-        }
-
-        if (healthyServers.length === 0) return;
-
-        const idleServers = healthyServers.filter(s => !s.isProcessing && s.queueLength === 0);
-        let candidates = [];
-
-        if (idleServers.length > 0) {
-          candidates = idleServers;
-        } else {
-          let minQueue = Math.min(...healthyServers.map(s => s.queueLength));
-          candidates = healthyServers.filter(s => s.queueLength === minQueue);
-        }
-
-        if (candidates.length > 0) {
-          const currentIsCandidate = candidates.some(c => c.sid === activeServerId);
-          if (!currentIsCandidate) {
-            const chosen = candidates[Math.floor(Math.random() * candidates.length)].sid;
-            joinServerSession(chosen);
-          }
-        }
-      }
-
-      function initMqttClient() {
-        if (client) {
-          try { client.end(true); } catch(e) {}
-          client = null;
-        }
-
-        isConnected = false;
-        sendBtn.disabled = true;
-        serverStatus.innerText = "Connecting relay...";
-
-        client = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
-          clientId: MQTT_CLIENT_ID,
-          clean: true,
-          keepalive: 15,
-          reconnectPeriod: 2000,
-          connectTimeout: 8000
-        });
-
-        client.on('connect', () => {
-          isConnected = true;
-          if (reconnectStallTimer) {
-            clearTimeout(reconnectStallTimer);
-            reconnectStallTimer = null;
-          }
-          serverStatus.innerText = "Scanning host servers...";
-          client.subscribe(HEARTBEAT_TOPIC);
-          if (activeServerId) joinServerSession(activeServerId);
-        });
-
-        client.on('reconnect', () => {
-          serverStatus.innerText = "Reconnecting relay...";
-          if (!reconnectStallTimer) {
-            reconnectStallTimer = setTimeout(() => {
-              reconnectStallTimer = null;
-              initMqttClient();
-            }, 10000);
-          }
-        });
-
-        client.on('offline', () => {
-          isConnected = false;
-          serverStatus.innerText = "Relay Offline";
-          sendBtn.disabled = true;
-        });
-
-        client.on('message', (topic, message) => {
-          try {
-            const payload = JSON.parse(message.toString());
-
-            if (topic === HEARTBEAT_TOPIC) {
-              if (payload && payload.serverId) {
-                discoveredServers[payload.serverId] = {
-                  queueLength: payload.queueLength,
-                  isProcessing: payload.isProcessing,
-                  lastSeen: Date.now()
-                };
-                autoSelectBestServer();
-              }
-              return;
-            }
-
-            if (payload.requestId && payload.requestId === activeRequestId) {
-              if (payload.type === "QUEUED") {
-                resetWatchdog();
-                if (currentAiBubble) currentAiBubble.innerText = `AI: ${payload.text}`;
-              }
-              else if (payload.type === "PROCESSING") {
-                resetWatchdog();
-                if (currentAiBubble) currentAiBubble.innerText = "AI is generating...";
-              }
-              else if (payload.type === "CHUNK") {
-                resetWatchdog();
-                targetStreamText = payload.text;
-                startStreamRender();
-              } 
-              else if (payload.type === "RESPONSE_COMPLETE") {
-                stopStreamRender();
-                if (currentAiBubble) currentAiBubble.innerText = "AI: " + payload.text;
-                clearWatchdog();
-                sendBtn.disabled = false;
-              }
-              else if (payload.type === "ERROR") {
-                stopStreamRender();
-                if (currentAiBubble) currentAiBubble.innerText = "Error: " + payload.text;
-                clearWatchdog();
-                sendBtn.disabled = false;
-              }
-            }
-          } catch(e) {}
-        });
-      }
-
-      function joinServerSession(sessionId) {
-        if (activeResponseTopic && client && isConnected) {
-          try { client.unsubscribe(activeResponseTopic); } catch(e) {}
-        }
-        activeServerId = sessionId;
-        activeResponseTopic = `ai-chat/${sessionId}/response/${LOGICAL_CLIENT_ID}`;
-        
-        if (client && isConnected) {
-          client.subscribe(activeResponseTopic, (err) => {
-            if (!err) {
-              serverStatus.innerHTML = `Connected: <b class="success">${sessionId}</b>`;
-              if (!activeRequestId) sendBtn.disabled = false;
-            }
-          });
-        }
-      }
-
-      function sendPrompt() {
-        const text = msgInput.value.trim();
-        if (!text || !activeServerId || !isConnected) return;
-
-        activeRequestId = "req-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6);
-        targetStreamText = "";
-        displayedStreamText = "";
-
-        logToChat(`<b>You:</b> ${text}`, "msg-user");
-        
-        currentAiBubble = document.createElement("div");
-        currentAiBubble.className = "msg-ai";
-        currentAiBubble.innerText = "AI: Requesting...";
-        chat.appendChild(currentAiBubble);
-        chat.scrollTop = chat.scrollHeight;
-
-        const promptTopic = `ai-chat/${activeServerId}/prompt`;
-        
-        client.publish(promptTopic, JSON.stringify({
-          clientId: LOGICAL_CLIENT_ID,
-          authKey: AUTH_KEY,
-          text: text,
-          requestId: activeRequestId,
-          ts: Date.now()
-        }), { qos: 1 });
-        
-        msgInput.value = "";
-        sendBtn.disabled = true;
-        resetWatchdog();
-      }
-
-      document.addEventListener("visibilitychange", () => {
-        if (document.visibilityState === "visible") {
-          if (!client || !client.connected) {
-            initMqttClient();
-          } else {
-            autoSelectBestServer();
-          }
-        }
-      });
-
-      window.addEventListener("online", () => initMqttClient());
-
-      setInterval(autoSelectBestServer, 3000);
-
-      sendBtn.addEventListener("click", sendPrompt);
-      msgInput.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" && !sendBtn.disabled) sendPrompt();
-      });
-
-      initMqttClient();
-    })();
-  </script>
+  <script src="serverConnector.js"></script>
+  <script src="messages.js"></script>
+  <script src="setup.js"></script>
 </body>
 </html>
