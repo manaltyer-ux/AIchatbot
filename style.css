@@ -70,9 +70,10 @@ body
   border: 1px solid #24313f;
   border-radius: 999px;
   cursor: pointer;
+  transition: opacity 0.2s;
 }
 
-#modelSwitchButton:hover
+#modelSwitchButton:hover:not(:disabled)
 {
   background-color: #1c2836;
   border-color: #35c9a6;
@@ -355,6 +356,33 @@ body
   max-width: 100%;
   border-radius: 14px;
   border: 1px solid #24313f;
+  margin-top: 8px;
+}
+
+.view-image-button
+{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #f0b429;
+  background-color: #1a1508;
+  border: 1px solid #4a3a09;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.view-image-button:hover
+{
+  background-color: #2b220c;
+  border-color: #f0b429;
+}
+
+.image-result-container
+{
+  margin-top: 4px;
 }
 
 .note-line
