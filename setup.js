@@ -8,8 +8,7 @@
 
   const modelDisplayNames = {
     "xaida-1.3": "Xaida 1.3",
-    "xaida-2.1": "Xaida 2.1",
-    "xaida-vision-1.1": "Xaida Vision 1.1"
+    "xaida-2.1": "Xaida 2.1"
   };
 
   function showPage(pageElement) {
@@ -32,7 +31,7 @@
 
   modelSwitchButton.addEventListener("click", function () {
     if (window.XaidaMessages && window.XaidaMessages.isRequestActive()) {
-      return; // Lock model selection while sending a message
+      return; 
     }
     showPage(modelPage);
   });
@@ -51,7 +50,7 @@
       if (card.dataset.available === "false") {
         showPage(chatPage);
         window.XaidaMessages.addNoteLine(
-          modelDisplayNames[chosenModel] + " is not available yet.",
+          (modelDisplayNames[chosenModel] || chosenModel) + " is not available yet. Coming soon!",
           true
         );
         return;
