@@ -1,9 +1,10 @@
 (function () {
   const BROKER_URL = "wss://broker.emqx.io:8084/mqtt";
   const HEARTBEAT_TOPIC = "xaida/servers/heartbeat";
+  const DEACTIVATE_TOPIC = "xaida/servers/deactivate";
   const PING_TOPIC = "xaida/servers/ping";
+  const SERVER_TIMEOUT_MS = 12000; 
 
-  // Web Worker timer to prevent background tab throttling
   function createWorkerInterval(fn, ms) {
     try {
       const blob = new Blob([`self.onmessage=function(){setInterval(function(){postMessage(0);},${ms});};`], { type: 'text/javascript' });
@@ -55,7 +56,7 @@
     },
 
     isReady: function () {
-      return relayIsConnected && currentServer !== "";
+      return relayIsConnected && currentServer !== "" && Boolean(discoveredServers[currentServer]);
     },
 
     start: function () {
@@ -72,7 +73,20 @@
     },
 
     sendPrompt: function (promptPayload) {
-      if (!XaidaConnector.isReady()) return false;
+     
+      if (!XaidaConnector.isReady()) {
+        reportStatus("No active server connected", "offline");
+        return false;
+      }
+
+      const serverInfo = discoveredServers[currentServer];
+      if (!serverInfo || (Date.now() - serverInfo.lastSeen > SERVER_TIMEOUT_MS)) {
+        removeServer(currentServer);
+        if (window.XaidaMessages && window.XaidaMessages.addNoteLine) {
+          window.XaidaMessages.addNoteLine("Server went offline. Searching for available server...", true);
+        }
+        return false;
+      }
 
       const payloadString = JSON.stringify({
         clientId: logicalClientId,
@@ -84,7 +98,6 @@
         sentAt: Date.now()
       });
 
-      // Prevent MQTT socket drops from oversized payloads (>250 KB)
       if (payloadString.length > 250000) {
         if (window.XaidaMessages && window.XaidaMessages.addNoteLine) {
           window.XaidaMessages.addNoteLine("Image payload is too large. Please select a smaller photo.", true);
@@ -124,6 +137,17 @@
     currentResponseTopic = "";
   }
 
+  function removeServer(serverId) {
+    if (discoveredServers[serverId]) {
+      delete discoveredServers[serverId];
+    }
+    if (currentServer === serverId) {
+      leaveCurrentServer();
+      reportStatus("Server offline. Finding new server...", "waiting");
+      pickBestServer();
+    }
+  }
+
   function joinServer(serverId) {
     leaveCurrentServer();
     currentServer = serverId;
@@ -131,36 +155,41 @@
     relayClient.subscribe(currentResponseTopic, function (subscribeError) {
       if (!subscribeError) {
         reportStatus("Server " + serverId, "online");
+      } else {
+        removeServer(serverId);
       }
     });
   }
 
   function pickBestServer() {
     const now = Date.now();
-    const healthyServers = [];
 
-    // Increase staleness timeout to 75s to keep connections healthy in background tabs
     Object.keys(discoveredServers).forEach(function (serverId) {
-      const serverInfo = discoveredServers[serverId];
-      if (now - serverInfo.lastSeen > 75000) {
+      if (now - discoveredServers[serverId].lastSeen > SERVER_TIMEOUT_MS) {
         delete discoveredServers[serverId];
-        return;
-      }
-      if (serverInfo.modelId === selectedModel) {
-        healthyServers.push({ serverId: serverId, queueLength: serverInfo.queueLength });
       }
     });
 
     if (currentServer && !discoveredServers[currentServer]) {
       leaveCurrentServer();
-      reportStatus("No server online", "offline");
     }
 
+    const healthyServers = [];
+    Object.keys(discoveredServers).forEach(function (serverId) {
+      const serverInfo = discoveredServers[serverId];
+      if (serverInfo.modelId === selectedModel) {
+        healthyServers.push({ serverId: serverId, queueLength: serverInfo.queueLength });
+      }
+    });
+
     if (healthyServers.length === 0) {
-      if (!currentServer) reportStatus("No " + selectedModel + " server", "offline");
+      if (!currentServer) {
+        reportStatus("No " + selectedModel + " server online", "offline");
+      }
       return;
     }
 
+    // 4. Find server with smallest queue
     const smallestQueue = Math.min.apply(
       null,
       healthyServers.map(function (entry) {
@@ -171,10 +200,12 @@
       return entry.queueLength === smallestQueue;
     });
 
-    const alreadyGood = candidates.some(function (entry) {
-      return entry.serverId === currentServer;
-    });
-    if (alreadyGood) return;
+    if (currentServer && discoveredServers[currentServer]) {
+      const isCurrentCandidate = candidates.some(function (entry) {
+        return entry.serverId === currentServer;
+      });
+      if (isCurrentCandidate) return;
+    }
 
     joinServer(candidates[Math.floor(Math.random() * candidates.length)].serverId);
   }
@@ -210,7 +241,10 @@
         relayRestartTimer = null;
       }
       reportStatus("Scanning servers", "waiting");
+
       relayClient.subscribe(HEARTBEAT_TOPIC);
+      relayClient.subscribe(DEACTIVATE_TOPIC);
+
       relayClient.publish(PING_TOPIC, "PING", { qos: 0 });
     });
 
@@ -238,7 +272,15 @@
       }
 
       if (topic === HEARTBEAT_TOPIC) {
-        if (!payload.serverId || !payload.modelId) return;
+        if (!payload.serverId) return;
+
+        if (payload.status === "offline" || payload.active === false || payload.deactivated === true) {
+          removeServer(payload.serverId);
+          return;
+        }
+
+        if (!payload.modelId) return;
+
         discoveredServers[payload.serverId] = {
           modelId: payload.modelId,
           queueLength: payload.queueLength || 0,
@@ -248,6 +290,14 @@
         return;
       }
 
+      if (topic === DEACTIVATE_TOPIC) {
+        if (payload.serverId) {
+          removeServer(payload.serverId);
+        }
+        return;
+      }
+
+      // Handle server responses
       if (topic === currentResponseTopic && typeof XaidaConnector.onServerMessage === "function") {
         XaidaConnector.onServerMessage(payload);
       }
