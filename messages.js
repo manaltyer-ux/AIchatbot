@@ -275,36 +275,19 @@
         return;
       }
 
-      // HIDE GENERATED IMAGE BEHIND A BUTTON FOR VISION MODEL
+      // DIRECTLY DISPLAY GENERATED IMAGES IN CHAT
       if (payload.type === "IMAGE") {
         resetStallTimer();
         if (activeAiBubble) {
           activeAiBubble.dataset.isImage = "true";
           activeAiBubble.innerHTML = "";
 
-          const imageContainer = document.createElement("div");
-          imageContainer.className = "image-result-container";
-
-          const toggleBtn = document.createElement("button");
-          toggleBtn.className = "view-image-button";
-          toggleBtn.type = "button";
-          toggleBtn.textContent = "📷 View Generated Image";
-
           const generatedImage = document.createElement("img");
           generatedImage.className = "generated-image";
           generatedImage.src = payload.imageUrl;
           generatedImage.alt = payload.caption || "Generated Image";
-          generatedImage.style.display = "none";
 
-          toggleBtn.addEventListener("click", function () {
-            const isHidden = generatedImage.style.display === "none";
-            generatedImage.style.display = isHidden ? "block" : "none";
-            toggleBtn.textContent = isHidden ? "🙈 Hide Generated Image" : "📷 View Generated Image";
-            scrollChatToBottom();
-          });
-
-          imageContainer.appendChild(toggleBtn);
-          imageContainer.appendChild(generatedImage);
+          activeAiBubble.appendChild(generatedImage);
 
           if (payload.caption) {
             const captionLine = document.createElement("p");
@@ -312,10 +295,9 @@
             captionLine.style.fontSize = "13px";
             captionLine.style.color = "#8ba0b2";
             captionLine.textContent = payload.caption;
-            imageContainer.appendChild(captionLine);
+            activeAiBubble.appendChild(captionLine);
           }
 
-          activeAiBubble.appendChild(imageContainer);
           scrollChatToBottom();
         }
         return;
