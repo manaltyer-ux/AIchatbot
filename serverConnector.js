@@ -4,6 +4,7 @@
   const DEACTIVATE_TOPIC = "xaida/servers/deactivate";
   const PING_TOPIC = "xaida/servers/ping";
   const SERVER_TIMEOUT_MS = 12000; 
+  const WATCHDOG_TIMEOUT_MS = 5000; // Max time allowed in 'reconnecting' state before hard reset
 
   function createWorkerInterval(fn, ms) {
     try {
@@ -39,7 +40,8 @@
   let selectedModel = localStorage.getItem("xaida_selected_model") || "xaida-2.1";
   let currentServer = "";
   let currentResponseTopic = "";
-  let relayRestartTimer = null;
+  let watchdogTimer = null;
+  let lastActiveTimestamp = Date.now();
 
   const XaidaConnector = {
     clientId: logicalClientId,
@@ -60,7 +62,7 @@
     },
 
     start: function () {
-      startRelay();
+      forceReconnect();
     },
 
     setSelectedModel: function (modelId) {
@@ -73,7 +75,6 @@
     },
 
     sendPrompt: function (promptPayload) {
-     
       if (!XaidaConnector.isReady()) {
         reportStatus("No active server connected", "offline");
         return false;
@@ -105,18 +106,25 @@
         return false;
       }
 
-      relayClient.publish("xaida/" + currentServer + "/prompt", payloadString, { qos: 0 });
-      return true;
+      try {
+        relayClient.publish("xaida/" + currentServer + "/prompt", payloadString, { qos: 0 });
+        return true;
+      } catch (e) {
+        forceReconnect();
+        return false;
+      }
     },
 
     announceDisconnect: function () {
       if (!relayClient || !relayIsConnected) return;
       Object.keys(discoveredServers).forEach(function (serverId) {
-        relayClient.publish(
-          "xaida/" + serverId + "/disconnect",
-          JSON.stringify({ clientId: logicalClientId, authKey: storedAuthKey }),
-          { qos: 0 }
-        );
+        try {
+          relayClient.publish(
+            "xaida/" + serverId + "/disconnect",
+            JSON.stringify({ clientId: logicalClientId, authKey: storedAuthKey }),
+            { qos: 0 }
+          );
+        } catch (e) {}
       });
     }
   };
@@ -152,13 +160,15 @@
     leaveCurrentServer();
     currentServer = serverId;
     currentResponseTopic = "xaida/" + serverId + "/response/" + logicalClientId;
-    relayClient.subscribe(currentResponseTopic, function (subscribeError) {
-      if (!subscribeError) {
-        reportStatus("Server " + serverId, "online");
-      } else {
-        removeServer(serverId);
-      }
-    });
+    if (relayClient && relayIsConnected) {
+      relayClient.subscribe(currentResponseTopic, function (subscribeError) {
+        if (!subscribeError) {
+          reportStatus("Server " + serverId, "online");
+        } else {
+          removeServer(serverId);
+        }
+      });
+    }
   }
 
   function pickBestServer() {
@@ -189,7 +199,6 @@
       return;
     }
 
-    // 4. Find server with smallest queue
     const smallestQueue = Math.min.apply(
       null,
       healthyServers.map(function (entry) {
@@ -210,36 +219,62 @@
     joinServer(candidates[Math.floor(Math.random() * candidates.length)].serverId);
   }
 
+  // Fully tears down old connection instance to prevent ghost/zombie websockets
+  function cleanupRelay() {
+    if (watchdogTimer) {
+      clearTimeout(watchdogTimer);
+      watchdogTimer = null;
+    }
+
+    if (relayClient) {
+      try {
+        relayClient.removeAllListeners();
+        relayClient.end(true); // Force close without waiting for acknowledgement
+      } catch (e) {}
+      relayClient = null;
+    }
+    relayIsConnected = false;
+  }
+
+  function forceReconnect() {
+    cleanupRelay();
+    startRelay();
+  }
+
   function startRelay() {
     if (typeof mqtt === "undefined") {
       reportStatus("MQTT library missing", "offline");
       return;
     }
 
-    if (relayClient) {
-      try {
-        relayClient.end(true);
-      } catch (endError) {}
-      relayClient = null;
-    }
+    cleanupRelay();
+    reportStatus("Connecting...", "waiting");
 
-    relayIsConnected = false;
-    reportStatus("Connecting", "waiting");
+    // Dynamic connection identifier forces the broker to drop any frozen ghost session instantly
+    const dynamicMqttClientId = "xaida-" + logicalClientId + "-" + Math.random().toString(36).substring(2, 6);
 
     relayClient = mqtt.connect(BROKER_URL, {
-      clientId: "xaida-client-" + logicalClientId,
+      clientId: dynamicMqttClientId,
       clean: true,
-      keepalive: 30,
+      keepalive: 15,
       reconnectPeriod: 2000,
-      connectTimeout: 8000
+      connectTimeout: 6000
     });
+
+    // Reset Watchdog: If connection is taking too long, blow it away and retry hard
+    watchdogTimer = setTimeout(function () {
+      if (!relayIsConnected) {
+        forceReconnect();
+      }
+    }, WATCHDOG_TIMEOUT_MS);
 
     relayClient.on("connect", function () {
       relayIsConnected = true;
-      if (relayRestartTimer) {
-        clearTimeout(relayRestartTimer);
-        relayRestartTimer = null;
+      if (watchdogTimer) {
+        clearTimeout(watchdogTimer);
+        watchdogTimer = null;
       }
+
       reportStatus("Scanning servers", "waiting");
 
       relayClient.subscribe(HEARTBEAT_TOPIC);
@@ -249,18 +284,24 @@
     });
 
     relayClient.on("reconnect", function () {
-      reportStatus("Reconnecting", "waiting");
-      if (!relayRestartTimer) {
-        relayRestartTimer = setTimeout(function () {
-          relayRestartTimer = null;
-          startRelay();
-        }, 10000);
+      reportStatus("Reconnecting...", "waiting");
+      
+      // If stuck reconnecting longer than WATCHDOG_TIMEOUT_MS, hard restart
+      if (!watchdogTimer) {
+        watchdogTimer = setTimeout(function () {
+          forceReconnect();
+        }, WATCHDOG_TIMEOUT_MS);
       }
     });
 
     relayClient.on("offline", function () {
       relayIsConnected = false;
       reportStatus("Relay offline", "offline");
+    });
+
+    relayClient.on("error", function () {
+      relayIsConnected = false;
+      forceReconnect();
     });
 
     relayClient.on("message", function (topic, rawMessage) {
@@ -297,26 +338,58 @@
         return;
       }
 
-      // Handle server responses
       if (topic === currentResponseTopic && typeof XaidaConnector.onServerMessage === "function") {
         XaidaConnector.onServerMessage(payload);
       }
     });
   }
 
-  createWorkerInterval(pickBestServer, 2000);
+  // Main Background / Sleep Watchdog Loop
+  createWorkerInterval(function () {
+    const now = Date.now();
+    const timePassed = now - lastActiveTimestamp;
+    lastActiveTimestamp = now;
+
+    // Detect OS sleep / frozen tab: if gap > 4 seconds, force clean reconnect
+    if (timePassed > 4000) {
+      forceReconnect();
+      return;
+    }
+
+    if (!relayIsConnected && (!relayClient || !relayClient.reconnecting)) {
+      forceReconnect();
+      return;
+    }
+
+    pickBestServer();
+  }, 2000);
+
+  // Resume Connection logic whenever page becomes active
+  function handleResume() {
+    const now = Date.now();
+    if (!relayClient || !relayIsConnected || (now - lastActiveTimestamp > 3000)) {
+      forceReconnect();
+    } else {
+      try {
+        relayClient.publish(PING_TOPIC, "PING", { qos: 0 });
+        pickBestServer();
+      } catch (e) {
+        forceReconnect();
+      }
+    }
+    lastActiveTimestamp = now;
+  }
 
   document.addEventListener("visibilitychange", function () {
-    if (document.visibilityState !== "visible") return;
-    if (!relayClient || !relayClient.connected) startRelay();
-    else {
-      relayClient.publish(PING_TOPIC, "PING", { qos: 0 });
-      pickBestServer();
+    if (document.visibilityState === "visible") {
+      handleResume();
     }
   });
 
+  window.addEventListener("focus", handleResume);
+  window.addEventListener("pageshow", handleResume);
   window.addEventListener("online", function () {
-    startRelay();
+    forceReconnect();
   });
 
   window.addEventListener("pagehide", function () {
