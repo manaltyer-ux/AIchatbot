@@ -31,6 +31,9 @@
   }
 
   modelSwitchButton.addEventListener("click", function () {
+    if (window.XaidaMessages && window.XaidaMessages.isRequestActive()) {
+      return; // Lock model selection while sending a message
+    }
     showPage(modelPage);
   });
 
@@ -41,6 +44,9 @@
 
   modelCards.forEach(function (card) {
     card.addEventListener("click", function () {
+      if (window.XaidaMessages && window.XaidaMessages.isRequestActive()) {
+        return; 
+      }
       const chosenModel = card.dataset.model;
       if (card.dataset.available === "false") {
         showPage(chatPage);
