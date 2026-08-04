@@ -1,44 +1,62 @@
-const chatPageElement = document.getElementById("chatPage");
-const selectorPageElement = document.getElementById("selectorPage");
+(function () {
+  const chatPage = document.getElementById("chatPage");
+  const modelPage = document.getElementById("modelPage");
+  const modelSwitchButton = document.getElementById("modelSwitchButton");
+  const activeModelLabel = document.getElementById("activeModelLabel");
+  const closeModelPageButton = document.getElementById("closeModelPageButton");
+  const modelCards = Array.prototype.slice.call(document.querySelectorAll(".model-card"));
 
-const openModelSelectorButtonElement = document.getElementById("openModelSelectorButton");
-const selectXaida21CardElement = document.getElementById("selectXaida21Card");
-const selectXaidaVisionCardElement = document.getElementById("selectXaidaVisionCard");
-const currentModelDisplayElement = document.getElementById("currentModelDisplay");
+  const modelDisplayNames = {
+    "xaida-1.3": "Xaida 1.3",
+    "xaida-2.1": "Xaida 2.1",
+    "xaida-vision-1.1": "Xaida Vision 1.1"
+  };
 
-function navigateToPage(targetPageIdentifier) {
-  if (targetPageIdentifier === "selector") {
-    chatPageElement.classList.remove("active");
-    selectorPageElement.classList.add("active");
-  } else {
-    selectorPageElement.classList.remove("active");
-    chatPageElement.classList.add("active");
-  }
-}
-
-function applyThemeForSelectedModel(modelName) {
-  selectedModelName = modelName;
-  currentModelDisplayElement.innerText = modelName;
-
-  if (modelName === "Xaida Vision 1.1") {
-    document.body.className = "xaida-vision-theme";
-  } else {
-    document.body.className = "xaida-21-theme";
+  function showPage(pageElement) {
+    chatPage.classList.remove("page-visible");
+    modelPage.classList.remove("page-visible");
+    pageElement.classList.add("page-visible");
   }
 
-  automaticallySelectOptimalServer();
-}
+  function highlightSelectedCard(selectedModel) {
+    modelCards.forEach(function (card) {
+      card.classList.toggle("card-active", card.dataset.model === selectedModel);
+    });
+  }
 
-openModelSelectorButtonElement.addEventListener("click", () => {
-  navigateToPage("selector");
-});
+  function applySelectedModel(selectedModel) {
+    activeModelLabel.textContent = modelDisplayNames[selectedModel] || selectedModel;
+    highlightSelectedCard(selectedModel);
+    window.XaidaConnector.setSelectedModel(selectedModel);
+  }
 
-selectXaida21CardElement.addEventListener("click", () => {
-  applyThemeForSelectedModel("Xaida 2.1");
-  navigateToPage("chat");
-});
+  modelSwitchButton.addEventListener("click", function () {
+    showPage(modelPage);
+  });
 
-selectXaidaVisionCardElement.addEventListener("click", () => {
-  applyThemeForSelectedModel("Xaida Vision 1.1");
-  navigateToPage("chat");
-});
+  closeModelPageButton.addEventListener("click", function () {
+    showPage(chatPage);
+    window.XaidaMessages.focusInput();
+  });
+
+  modelCards.forEach(function (card) {
+    card.addEventListener("click", function () {
+      const chosenModel = card.dataset.model;
+      if (card.dataset.available === "false") {
+        showPage(chatPage);
+        window.XaidaMessages.addNoteLine(
+          modelDisplayNames[chosenModel] + " is not available yet.",
+          true
+        );
+        return;
+      }
+      applySelectedModel(chosenModel);
+      showPage(chatPage);
+      window.XaidaMessages.focusInput();
+    });
+  });
+
+  const startupModel = window.XaidaConnector.getSelectedModel();
+  activeModelLabel.textContent = modelDisplayNames[startupModel] || startupModel;
+  highlightSelectedCard(startupModel);
+})();
