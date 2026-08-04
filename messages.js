@@ -1,204 +1,287 @@
-let currentActiveRequestId = null;
-let activeStreamingMessageElement = null;
-let accumulatedStreamedTextBuffer = "";
-let attachedImageBase64Data = null;
+(function () {
+  const chatBox = document.getElementById("chatBox");
+  const emptyChatState = document.getElementById("emptyChatState");
+  const messageInput = document.getElementById("messageInput");
+  const sendButton = document.getElementById("sendButton");
+  const serverDot = document.getElementById("serverDot");
+  const serverStatusText = document.getElementById("serverStatusText");
+  const imageAttachInput = document.getElementById("imageAttachInput");
+  const attachmentPreview = document.getElementById("attachmentPreview");
+  const attachmentThumb = document.getElementById("attachmentThumb");
+  const removeAttachmentButton = document.getElementById("removeAttachmentButton");
 
-const chatMessageDisplayElement = document.getElementById("chatMessageDisplay");
-const userInputFieldElement = document.getElementById("userInputField");
-const sendMessageButtonElement = document.getElementById("sendMessageButton");
-const imageAttachmentInputElement = document.getElementById("imageAttachmentInput");
-const imagePreviewContainerElement = document.getElementById("imagePreviewContainer");
-const imagePreviewNameElement = document.getElementById("imagePreviewName");
-const removeImageButtonElement = document.getElementById("removeImageButton");
+  let activeRequestId = null;
+  let activeAiBubble = null;
+  let streamedMarkdown = "";
+  let renderIsPending = false;
+  let attachedImageDataUrl = null;
+  let stallTimer = null;
 
-marked.setOptions({
-  highlight: function (codeSnippet, languageName) {
-    const validLanguageName = hljs.getLanguage(languageName) ? languageName : 'plaintext';
-    return hljs.highlight(codeSnippet, { language: validLanguageName }).value;
-  },
-  breaks: true
-});
+  marked.setOptions({ breaks: true, gfm: true });
 
-function handleUserSubmitMessage() {
-  const userTextPrompt = userInputFieldElement.value.trim();
-
-  if (!userTextPrompt && !attachedImageBase64Data) {
-    return;
+  function clearEmptyState() {
+    if (emptyChatState && emptyChatState.parentNode) emptyChatState.remove();
   }
 
-  appendUserMessageToDisplay(userTextPrompt, attachedImageBase64Data);
-
-  const newRequestId = sendPromptToServer(userTextPrompt, attachedImageBase64Data);
-
-  if (newRequestId) {
-    currentActiveRequestId = newRequestId;
-    accumulatedStreamedTextBuffer = "";
-    activeStreamingMessageElement = createAiMessageBubbleElement();
-    updateAiMessageBubbleText(activeStreamingMessageElement, "Waiting for response...");
-  } else {
-    const errorBubbleElement = createAiMessageBubbleElement();
-    updateAiMessageBubbleText(errorBubbleElement, "Failed to send request. Server unavailable.");
+  function scrollChatToBottom() {
+    chatBox.scrollTop = chatBox.scrollHeight;
   }
 
-  clearInputControls();
-}
+  function addUserRow(userText, imageDataUrl) {
+    clearEmptyState();
+    const row = document.createElement("div");
+    row.className = "chat-row row-user";
 
-function clearInputControls() {
-  userInputFieldElement.value = "";
-  attachedImageBase64Data = null;
-  imagePreviewContainerElement.classList.add("hidden");
-  imageAttachmentInputElement.value = "";
-}
+    if (imageDataUrl) {
+      const referenceImage = document.createElement("img");
+      referenceImage.className = "generated-image";
+      referenceImage.src = imageDataUrl;
+      referenceImage.alt = "Reference image sent by user";
+      referenceImage.style.maxWidth = "220px";
+      row.appendChild(referenceImage);
+    }
 
-function appendUserMessageToDisplay(textPrompt, imageBase64) {
-  const userBubbleElement = document.createElement("div");
-  userBubbleElement.className = "messageBubble userMessage";
+    const bubble = document.createElement("div");
+    bubble.className = "bubble-user";
+    bubble.textContent = userText;
+    row.appendChild(bubble);
 
-  if (textPrompt) {
-    const textParagraphElement = document.createElement("p");
-    textParagraphElement.innerText = textPrompt;
-    userBubbleElement.appendChild(textParagraphElement);
+    chatBox.appendChild(row);
+    scrollChatToBottom();
   }
 
-  if (imageBase64) {
-    const imageTagElement = document.createElement("img");
-    imageTagElement.src = imageBase64;
-    imageTagElement.className = "messageImageReference";
-    userBubbleElement.appendChild(imageTagElement);
+  function addAiBubble() {
+    const row = document.createElement("div");
+    row.className = "chat-row row-ai";
+    const bubble = document.createElement("div");
+    bubble.className = "bubble-ai";
+    bubble.innerHTML = '<span class="typing-dots"><span></span><span></span><span></span></span>';
+    row.appendChild(bubble);
+    chatBox.appendChild(row);
+    scrollChatToBottom();
+    return bubble;
   }
 
-  chatMessageDisplayElement.appendChild(userBubbleElement);
-  scrollChatToBottom();
-}
+  function addNoteLine(noteText, isError) {
+    clearEmptyState();
+    const note = document.createElement("div");
+    note.className = isError ? "note-line note-error" : "note-line";
+    note.textContent = noteText;
+    chatBox.appendChild(note);
+    scrollChatToBottom();
+  }
 
-function createAiMessageBubbleElement() {
-  const aiBubbleElement = document.createElement("div");
-  aiBubbleElement.className = "messageBubble aiMessage";
-  chatMessageDisplayElement.appendChild(aiBubbleElement);
-  scrollChatToBottom();
-  return aiBubbleElement;
-}
+  function decorateCodeBlocks(bubbleElement) {
+    bubbleElement.querySelectorAll("pre").forEach(function (preElement) {
+      if (preElement.parentNode.classList.contains("code-block")) return;
 
-function updateAiMessageBubbleText(bubbleElement, rawMarkdownContent) {
-  const parsedHtmlContent = marked.parse(rawMarkdownContent);
-  bubbleElement.innerHTML = parsedHtmlContent;
-  enhanceCodeBlocksWithCopyButtons(bubbleElement);
-  scrollChatToBottom();
-}
+      const codeElement = preElement.querySelector("code");
+      const languageName =
+        (codeElement && codeElement.className.replace("language-", "").trim()) || "text";
 
-function enhanceCodeBlocksWithCopyButtons(parentElement) {
-  const preElementsList = parentElement.querySelectorAll("pre");
+      const wrapper = document.createElement("div");
+      wrapper.className = "code-block";
 
-  preElementsList.forEach((preElement) => {
-    if (preElement.parentNode.classList.contains("codeBlockContainer")) {
+      const headBar = document.createElement("div");
+      headBar.className = "code-block-head";
+
+      const languageLabel = document.createElement("span");
+      languageLabel.textContent = languageName;
+
+      const copyButton = document.createElement("button");
+      copyButton.className = "copy-code-button";
+      copyButton.type = "button";
+      copyButton.textContent = "Copy";
+      copyButton.addEventListener("click", function () {
+        navigator.clipboard.writeText(codeElement ? codeElement.innerText : preElement.innerText);
+        copyButton.textContent = "Copied";
+        setTimeout(function () {
+          copyButton.textContent = "Copy";
+        }, 1600);
+      });
+
+      headBar.appendChild(languageLabel);
+      headBar.appendChild(copyButton);
+
+      preElement.parentNode.insertBefore(wrapper, preElement);
+      wrapper.appendChild(headBar);
+      wrapper.appendChild(preElement);
+
+      if (codeElement && window.hljs) {
+        try {
+          hljs.highlightElement(codeElement);
+        } catch (highlightError) {}
+      }
+    });
+  }
+
+  function renderStreamedMarkdown() {
+    renderIsPending = false;
+    if (!activeAiBubble) return;
+    activeAiBubble.innerHTML = marked.parse(streamedMarkdown);
+    decorateCodeBlocks(activeAiBubble);
+    scrollChatToBottom();
+  }
+
+  function scheduleStreamRender() {
+    if (renderIsPending) return;
+    renderIsPending = true;
+    requestAnimationFrame(renderStreamedMarkdown);
+  }
+
+  function resetStallTimer() {
+    if (stallTimer) clearTimeout(stallTimer);
+    stallTimer = setTimeout(function () {
+      if (!activeRequestId) return;
+      addNoteLine("Request stalled, no activity for 60s", true);
+      finishRequest();
+    }, 60000);
+  }
+
+  function finishRequest() {
+    if (stallTimer) clearTimeout(stallTimer);
+    stallTimer = null;
+    activeRequestId = null;
+    activeAiBubble = null;
+    streamedMarkdown = "";
+    refreshSendAvailability();
+  }
+
+  function refreshSendAvailability() {
+    sendButton.disabled = !window.XaidaConnector.isReady() || activeRequestId !== null;
+  }
+
+  function clearAttachment() {
+    attachedImageDataUrl = null;
+    imageAttachInput.value = "";
+    attachmentPreview.hidden = true;
+  }
+
+  function sendCurrentMessage() {
+    const userText = messageInput.value.trim();
+    if (!userText || activeRequestId || !window.XaidaConnector.isReady()) return;
+
+    activeRequestId = "req-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6);
+    streamedMarkdown = "";
+
+    addUserRow(userText, attachedImageDataUrl);
+    activeAiBubble = addAiBubble();
+
+    const wasSent = window.XaidaConnector.sendPrompt({
+      text: userText,
+      imageDataUrl: attachedImageDataUrl,
+      requestId: activeRequestId
+    });
+
+    if (!wasSent) {
+      activeAiBubble.textContent = "Could not reach the server.";
+      finishRequest();
       return;
     }
 
-    const codeElement = preElement.querySelector("code");
-    let detectedLanguageName = "code";
+    messageInput.value = "";
+    messageInput.style.height = "auto";
+    clearAttachment();
+    refreshSendAvailability();
+    resetStallTimer();
+    messageInput.focus();
+  }
 
-    if (codeElement && codeElement.className) {
-      const classMatchResult = codeElement.className.match(/language-(\w+)/);
-      if (classMatchResult) {
-        detectedLanguageName = classMatchResult[1];
+  window.XaidaConnector.onStatusChange = function (statusText, statusKind) {
+    serverStatusText.textContent = statusText;
+    serverDot.className = "";
+    if (statusKind === "online") serverDot.classList.add("dot-online");
+    if (statusKind === "offline") serverDot.classList.add("dot-offline");
+    refreshSendAvailability();
+  };
+
+  window.XaidaConnector.onServerMessage = function (payload) {
+    if (!payload || payload.requestId !== activeRequestId) return;
+
+    if (payload.type === "QUEUED" || payload.type === "PROCESSING") {
+      resetStallTimer();
+      return;
+    }
+
+    if (payload.type === "CHUNK") {
+      resetStallTimer();
+      if (typeof payload.delta === "string") streamedMarkdown += payload.delta;
+      else if (typeof payload.text === "string") streamedMarkdown = payload.text;
+      scheduleStreamRender();
+      return;
+    }
+
+    if (payload.type === "IMAGE") {
+      resetStallTimer();
+      if (activeAiBubble) {
+        activeAiBubble.innerHTML = "";
+        const generatedImage = document.createElement("img");
+        generatedImage.className = "generated-image";
+        generatedImage.src = payload.imageUrl;
+        generatedImage.alt = payload.caption || "Image generated by Xaida Vision 1.1";
+        activeAiBubble.appendChild(generatedImage);
+        if (payload.caption) {
+          const captionLine = document.createElement("p");
+          captionLine.textContent = payload.caption;
+          activeAiBubble.appendChild(captionLine);
+        }
+        scrollChatToBottom();
       }
+      return;
     }
 
-    const codeBlockContainerElement = document.createElement("div");
-    codeBlockContainerElement.className = "codeBlockContainer";
+    if (payload.type === "RESPONSE_COMPLETE") {
+      if (typeof payload.text === "string" && payload.text.length > streamedMarkdown.length) {
+        streamedMarkdown = payload.text;
+      }
+      renderStreamedMarkdown();
+      finishRequest();
+      messageInput.focus();
+      return;
+    }
 
-    const codeBlockHeaderElement = document.createElement("div");
-    codeBlockHeaderElement.className = "codeBlockHeader";
+    if (payload.type === "ERROR") {
+      if (activeAiBubble) activeAiBubble.textContent = payload.text || "Server error.";
+      finishRequest();
+    }
+  };
 
-    const languageLabelElement = document.createElement("span");
-    languageLabelElement.innerText = detectedLanguageName;
+  sendButton.addEventListener("click", sendCurrentMessage);
 
-    const copyCodeButtonElement = document.createElement("button");
-    copyCodeButtonElement.className = "copyCodeButton";
-    copyCodeButtonElement.innerText = "Copy";
-
-    copyCodeButtonElement.addEventListener("click", () => {
-      const codeToCopyText = codeElement ? codeElement.innerText : preElement.innerText;
-      navigator.clipboard.writeText(codeToCopyText).then(() => {
-        copyCodeButtonElement.innerText = "Copied!";
-        setTimeout(() => {
-          copyCodeButtonElement.innerText = "Copy";
-        }, 2000);
-      });
-    });
-
-    codeBlockHeaderElement.appendChild(languageLabelElement);
-    codeBlockHeaderElement.appendChild(copyCodeButtonElement);
-
-    preElement.parentNode.insertBefore(codeBlockContainerElement, preElement);
-    codeBlockContainerElement.appendChild(codeBlockHeaderElement);
-    codeBlockContainerElement.appendChild(preElement);
+  messageInput.addEventListener("keydown", function (keyEvent) {
+    if (keyEvent.key === "Enter" && !keyEvent.shiftKey) {
+      keyEvent.preventDefault();
+      sendCurrentMessage();
+    }
   });
-}
 
-function handleIncomingServerResponsePayload(responsePayload) {
-  if (responsePayload.requestId !== currentActiveRequestId) {
-    return;
-  }
+  messageInput.addEventListener("input", function () {
+    messageInput.style.height = "auto";
+    messageInput.style.height = Math.min(messageInput.scrollHeight, 150) + "px";
+  });
 
-  if (responsePayload.type === "CHUNK") {
-    accumulatedStreamedTextBuffer = responsePayload.text;
-    if (activeStreamingMessageElement) {
-      updateAiMessageBubbleText(activeStreamingMessageElement, accumulatedStreamedTextBuffer);
-    }
-  } else if (responsePayload.type === "RESPONSE_COMPLETE") {
-    accumulatedStreamedTextBuffer = responsePayload.text;
-    if (activeStreamingMessageElement) {
-      updateAiMessageBubbleText(activeStreamingMessageElement, accumulatedStreamedTextBuffer);
-    }
-    currentActiveRequestId = null;
-    activeStreamingMessageElement = null;
-  } else if (responsePayload.type === "IMAGE_RESPONSE") {
-    if (activeStreamingMessageElement) {
-      const imageTagElement = document.createElement("img");
-      imageTagElement.src = responsePayload.imageUrl;
-      imageTagElement.className = "messageImageReference";
-      activeStreamingMessageElement.innerHTML = "";
-      activeStreamingMessageElement.appendChild(imageTagElement);
-    }
-    currentActiveRequestId = null;
-    activeStreamingMessageElement = null;
-  } else if (responsePayload.type === "ERROR") {
-    if (activeStreamingMessageElement) {
-      updateAiMessageBubbleText(activeStreamingMessageElement, "Error: " + responsePayload.text);
-    }
-    currentActiveRequestId = null;
-    activeStreamingMessageElement = null;
-  }
-}
-
-function scrollChatToBottom() {
-  chatMessageDisplayElement.scrollTop = chatMessageDisplayElement.scrollHeight;
-}
-
-imageAttachmentInputElement.addEventListener("change", (fileChangeEvent) => {
-  const selectedFile = fileChangeEvent.target.files[0];
-  if (selectedFile) {
-    const fileReaderInstance = new FileReader();
-    fileReaderInstance.onload = (readerLoadEvent) => {
-      attachedImageBase64Data = readerLoadEvent.target.result;
-      imagePreviewNameElement.innerText = selectedFile.name;
-      imagePreviewContainerElement.classList.remove("hidden");
+  imageAttachInput.addEventListener("change", function () {
+    const pickedFile = imageAttachInput.files && imageAttachInput.files[0];
+    if (!pickedFile) return;
+    const fileReader = new FileReader();
+    fileReader.onload = function () {
+      attachedImageDataUrl = String(fileReader.result);
+      attachmentThumb.src = attachedImageDataUrl;
+      attachmentPreview.hidden = false;
     };
-    fileReaderInstance.readAsDataURL(selectedFile);
-  }
-});
+    fileReader.readAsDataURL(pickedFile);
+  });
 
-removeImageButtonElement.addEventListener("click", () => {
-  attachedImageBase64Data = null;
-  imageAttachmentInputElement.value = "";
-  imagePreviewContainerElement.classList.add("hidden");
-});
+  removeAttachmentButton.addEventListener("click", clearAttachment);
 
-sendMessageButtonElement.addEventListener("click", handleUserSubmitMessage);
+  window.XaidaMessages = {
+    addNoteLine: addNoteLine,
+    refreshSendAvailability: refreshSendAvailability,
+    focusInput: function () {
+      messageInput.focus();
+    }
+  };
 
-userInputFieldElement.addEventListener("keydown", (keyboardEvent) => {
-  if (keyboardEvent.key === "Enter") {
-    handleUserSubmitMessage();
-  }
-});
+  window.XaidaConnector.start();
+  messageInput.focus();
+})();
