@@ -60,19 +60,26 @@
 
     sendPrompt: function (promptPayload) {
       if (!XaidaConnector.isReady()) return false;
-      relayClient.publish(
-        "xaida/" + currentServer + "/prompt",
-        JSON.stringify({
-          clientId: logicalClientId,
-          authKey: storedAuthKey,
-          modelId: selectedModel,
-          text: promptPayload.text,
-          imageDataUrl: promptPayload.imageDataUrl || null,
-          requestId: promptPayload.requestId,
-          sentAt: Date.now()
-        }),
-        { qos: 0 }
-      );
+
+      const payloadString = JSON.stringify({
+        clientId: logicalClientId,
+        authKey: storedAuthKey,
+        modelId: selectedModel,
+        text: promptPayload.text,
+        imageDataUrl: promptPayload.imageDataUrl || null,
+        requestId: promptPayload.requestId,
+        sentAt: Date.now()
+      });
+
+      // Prevent MQTT socket drops from oversized payloads (>250 KB)
+      if (payloadString.length > 250000) {
+        if (window.XaidaMessages && window.XaidaMessages.addNoteLine) {
+          window.XaidaMessages.addNoteLine("Image payload is too large. Please select a smaller photo.", true);
+        }
+        return false;
+      }
+
+      relayClient.publish("xaida/" + currentServer + "/prompt", payloadString, { qos: 0 });
       return true;
     },
 
