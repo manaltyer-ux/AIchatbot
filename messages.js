@@ -12,8 +12,13 @@
 
   let activeRequestId = null;
   let activeAiBubble = null;
-  let streamedMarkdown = "";
-  let renderIsPending = false;
+  
+  // STREAMING & TYPEWRITER DIALOGUE STATE
+  let targetMarkdown = "";
+  let displayedMarkdown = "";
+  let typingAnimationId = null;
+  let isResponseComplete = false;
+  
   let attachedImageDataUrl = null;
   let stallTimer = null;
 
@@ -21,7 +26,7 @@
     marked.setOptions({ breaks: true, gfm: true });
   }
 
-  // AUTOMATIC CLIENT-SIDE IMAGE COMPRESSION (Prevents MQTT socket disconnects)
+  // AUTOMATIC CLIENT-SIDE IMAGE COMPRESSION
   function compressImage(file, maxWidth, maxHeight, quality, callback) {
     const reader = new FileReader();
     reader.onload = function (e) {
@@ -152,29 +157,71 @@
     });
   }
 
-  function renderStreamedMarkdown() {
-    renderIsPending = false;
+  // RENDER MARKDOWN TEXT TO AI BUBBLE
+  function renderMarkdownText(text) {
     if (!activeAiBubble || activeAiBubble.dataset.isImage === "true") return;
 
     if (typeof marked !== "undefined" && marked.parse) {
-      activeAiBubble.innerHTML = marked.parse(streamedMarkdown);
+      activeAiBubble.innerHTML = marked.parse(text);
     } else {
-      activeAiBubble.textContent = streamedMarkdown;
+      activeAiBubble.textContent = text;
     }
     decorateCodeBlocks(activeAiBubble);
     scrollChatToBottom();
   }
 
-  function scheduleStreamRender() {
-    if (renderIsPending) return;
-    renderIsPending = true;
-    requestAnimationFrame(renderStreamedMarkdown);
+  // TYPEWRITER / DIALOG STREAMING ENGINE
+  function startTypingLoop() {
+    if (typingAnimationId) return;
+
+    function step() {
+      if (!activeAiBubble || activeAiBubble.dataset.isImage === "true") {
+        typingAnimationId = null;
+        return;
+      }
+
+      const remainingChars = targetMarkdown.length - displayedMarkdown.length;
+
+      if (remainingChars > 0) {
+        // Dynamic speed calculation: smooth character-by-character flow
+        let charsToAdd = 1;
+        if (remainingChars > 150) charsToAdd = 8;
+        else if (remainingChars > 80) charsToAdd = 5;
+        else if (remainingChars > 30) charsToAdd = 3;
+        else if (remainingChars > 10) charsToAdd = 2;
+
+        // Accelerate smoothly if server signal is already finished
+        if (isResponseComplete) {
+          charsToAdd = Math.max(charsToAdd, Math.ceil(remainingChars / 5));
+        }
+
+        const nextLength = displayedMarkdown.length + charsToAdd;
+        displayedMarkdown = targetMarkdown.slice(0, nextLength);
+
+        renderMarkdownText(displayedMarkdown);
+        typingAnimationId = requestAnimationFrame(step);
+      } else {
+        // Stream caught up with target text
+        if (isResponseComplete) {
+          renderMarkdownText(targetMarkdown);
+          typingAnimationId = null;
+          finishRequest();
+          if (messageInput) messageInput.focus();
+        } else {
+          // Waiting for more chunks
+          typingAnimationId = null;
+        }
+      }
+    }
+
+    typingAnimationId = requestAnimationFrame(step);
   }
 
   function resetStallTimer() {
     if (stallTimer) clearTimeout(stallTimer);
     stallTimer = setTimeout(function () {
       if (!activeRequestId) return;
+      if (typingAnimationId) cancelAnimationFrame(typingAnimationId);
       if (activeAiBubble) {
         activeAiBubble.textContent = "Error: Request timed out (No response activity for 45s).";
       }
@@ -185,10 +232,16 @@
 
   function finishRequest() {
     if (stallTimer) clearTimeout(stallTimer);
+    if (typingAnimationId) cancelAnimationFrame(typingAnimationId);
+
     stallTimer = null;
+    typingAnimationId = null;
     activeRequestId = null;
     activeAiBubble = null;
-    streamedMarkdown = "";
+    targetMarkdown = "";
+    displayedMarkdown = "";
+    isResponseComplete = false;
+
     refreshSendAvailability();
   }
 
@@ -217,7 +270,9 @@
     if ((!userText && !attachedImageDataUrl) || activeRequestId || !window.XaidaConnector || !window.XaidaConnector.isReady()) return;
 
     activeRequestId = "req-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6);
-    streamedMarkdown = "";
+    targetMarkdown = "";
+    displayedMarkdown = "";
+    isResponseComplete = false;
 
     const selectedModel = window.XaidaConnector.getSelectedModel();
     const promptTextToSend = userText || (selectedModel === "xaida-vision-1.1" ? "Generate an image based on this reference" : "Please analyze this image");
@@ -267,11 +322,11 @@
       if (payload.type === "CHUNK") {
         resetStallTimer();
         if (typeof payload.text === "string") {
-          streamedMarkdown = payload.text;
+          targetMarkdown = payload.text;
         } else if (typeof payload.delta === "string") {
-          streamedMarkdown += payload.delta;
+          targetMarkdown += payload.delta;
         }
-        scheduleStreamRender();
+        startTypingLoop();
         return;
       }
 
@@ -304,21 +359,22 @@
       }
 
       if (payload.type === "RESPONSE_COMPLETE") {
+        resetStallTimer();
         if (activeAiBubble && activeAiBubble.dataset.isImage === "true") {
           finishRequest();
           if (messageInput) messageInput.focus();
           return;
         }
         if (typeof payload.text === "string" && payload.text.length > 0) {
-          streamedMarkdown = payload.text;
+          targetMarkdown = payload.text;
         }
-        renderStreamedMarkdown();
-        finishRequest();
-        if (messageInput) messageInput.focus();
+        isResponseComplete = true;
+        startTypingLoop();
         return;
       }
 
       if (payload.type === "ERROR") {
+        if (typingAnimationId) cancelAnimationFrame(typingAnimationId);
         if (activeAiBubble) activeAiBubble.textContent = "Error: " + (payload.text || "Server error.");
         finishRequest();
       }
