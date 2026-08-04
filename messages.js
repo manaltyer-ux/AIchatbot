@@ -21,6 +21,39 @@
     marked.setOptions({ breaks: true, gfm: true });
   }
 
+  // AUTOMATIC CLIENT-SIDE IMAGE COMPRESSION (Prevents MQTT socket disconnects)
+  function compressImage(file, maxWidth, maxHeight, quality, callback) {
+    const reader = new FileReader();
+    reader.onload = function (e) {
+      const img = new Image();
+      img.onload = function () {
+        let width = img.width;
+        let height = img.height;
+
+        if (width > maxWidth || height > maxHeight) {
+          if (width / height > maxWidth / maxHeight) {
+            height = Math.round((height * maxWidth) / width);
+            width = maxWidth;
+          } else {
+            width = Math.round((width * maxHeight) / height);
+            height = maxHeight;
+          }
+        }
+
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, width, height);
+
+        const compressedDataUrl = canvas.toDataURL("image/jpeg", quality);
+        callback(compressedDataUrl);
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
   function clearEmptyState() {
     if (emptyChatState && emptyChatState.parentNode) emptyChatState.remove();
   }
@@ -288,13 +321,13 @@
     imageAttachInput.addEventListener("change", function () {
       const pickedFile = imageAttachInput.files && imageAttachInput.files[0];
       if (!pickedFile) return;
-      const fileReader = new FileReader();
-      fileReader.onload = function () {
-        attachedImageDataUrl = String(fileReader.result);
+
+
+      compressImage(pickedFile, 800, 800, 0.7, function (compressedDataUrl) {
+        attachedImageDataUrl = compressedDataUrl;
         attachmentThumb.src = attachedImageDataUrl;
         attachmentPreview.hidden = false;
-      };
-      fileReader.readAsDataURL(pickedFile);
+      });
     });
   }
 
