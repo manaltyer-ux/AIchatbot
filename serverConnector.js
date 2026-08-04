@@ -1,6 +1,7 @@
 (function () {
   const BROKER_URL = "wss://broker.emqx.io:8084/mqtt";
   const HEARTBEAT_TOPIC = "xaida/servers/heartbeat";
+  const PING_TOPIC = "xaida/servers/ping";
 
   let storedUserId = localStorage.getItem("xaida_user_id");
   if (!storedUserId) {
@@ -53,7 +54,7 @@
       selectedModel = modelId;
       localStorage.setItem("xaida_selected_model", modelId);
       leaveCurrentServer();
-      reportStatus("Looking for a " + modelId + " server", "waiting");
+      reportStatus("Looking for " + modelId + " server...", "waiting");
       pickBestServer();
     },
 
@@ -120,7 +121,7 @@
 
     Object.keys(discoveredServers).forEach(function (serverId) {
       const serverInfo = discoveredServers[serverId];
-      if (now - serverInfo.lastSeen > 10000) {
+      if (now - serverInfo.lastSeen > 12000) {
         delete discoveredServers[serverId];
         return;
       }
@@ -158,6 +159,11 @@
   }
 
   function startRelay() {
+    if (typeof mqtt === "undefined") {
+      reportStatus("MQTT library missing", "offline");
+      return;
+    }
+
     if (relayClient) {
       try {
         relayClient.end(true);
@@ -184,6 +190,7 @@
       }
       reportStatus("Scanning servers", "waiting");
       relayClient.subscribe(HEARTBEAT_TOPIC);
+      relayClient.publish(PING_TOPIC, "PING", { qos: 0 });
     });
 
     relayClient.on("reconnect", function () {
@@ -226,12 +233,15 @@
     });
   }
 
-  setInterval(pickBestServer, 3000);
+  setInterval(pickBestServer, 2000);
 
   document.addEventListener("visibilitychange", function () {
     if (document.visibilityState !== "visible") return;
     if (!relayClient || !relayClient.connected) startRelay();
-    else pickBestServer();
+    else {
+      relayClient.publish(PING_TOPIC, "PING", { qos: 0 });
+      pickBestServer();
+    }
   });
 
   window.addEventListener("online", function () {
