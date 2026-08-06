@@ -4,7 +4,7 @@
   const DEACTIVATE_TOPIC = "xaida/servers/deactivate";
   const PING_TOPIC = "xaida/servers/ping";
   const SERVER_TIMEOUT_MS = 12000; 
-  const WATCHDOG_TIMEOUT_MS = 5000; 
+  const WATCHDOG_TIMEOUT_MS = 5000;
 
   function createWorkerInterval(fn, ms) {
     try {
