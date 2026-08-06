@@ -58,7 +58,11 @@
     },
 
     isReady: function () {
-      return relayIsConnected && currentServer !== "" && Boolean(discoveredServers[currentServer]);
+      if (!relayIsConnected || !currentServer || !discoveredServers[currentServer]) {
+        return false;
+      }
+      const s = discoveredServers[currentServer];
+      return !s.isBusy;
     },
 
     start: function () {
@@ -75,16 +79,19 @@
     },
 
     sendPrompt: function (promptPayload) {
+      // Re-evaluate server availability before sending
+      pickBestServer();
+
       if (!XaidaConnector.isReady()) {
-        reportStatus("No active server connected", "offline");
+        reportStatus("No active/available server connected", "offline");
         return false;
       }
 
       const serverInfo = discoveredServers[currentServer];
-      if (!serverInfo || (Date.now() - serverInfo.lastSeen > SERVER_TIMEOUT_MS)) {
+      if (!serverInfo || serverInfo.isBusy || (Date.now() - serverInfo.lastSeen > SERVER_TIMEOUT_MS)) {
         removeServer(currentServer);
         if (window.XaidaMessages && window.XaidaMessages.addNoteLine) {
-          window.XaidaMessages.addNoteLine("Server went offline. Searching for available server...", true);
+          window.XaidaMessages.addNoteLine("Server busy or offline. Searching for available server...", true);
         }
         return false;
       }
@@ -151,7 +158,7 @@
     }
     if (currentServer === serverId) {
       leaveCurrentServer();
-      reportStatus("Server offline. Finding new server...", "waiting");
+      reportStatus("Server unavailable. Finding new server...", "waiting");
       pickBestServer();
     }
   }
@@ -174,49 +181,65 @@
   function pickBestServer() {
     const now = Date.now();
 
+    // 1. Purge stale servers
     Object.keys(discoveredServers).forEach(function (serverId) {
       if (now - discoveredServers[serverId].lastSeen > SERVER_TIMEOUT_MS) {
         delete discoveredServers[serverId];
       }
     });
 
-    if (currentServer && !discoveredServers[currentServer]) {
-      leaveCurrentServer();
-    }
-
+    // 2. Filter available (non-busy) servers matching selected model
     const healthyServers = [];
     Object.keys(discoveredServers).forEach(function (serverId) {
       const serverInfo = discoveredServers[serverId];
-      if (serverInfo.modelId === selectedModel) {
-        healthyServers.push({ serverId: serverId, queueLength: serverInfo.queueLength });
+      if (serverInfo.modelId === selectedModel && !serverInfo.isBusy) {
+        healthyServers.push({
+          serverId: serverId,
+          queueLength: serverInfo.queueLength
+        });
       }
     });
 
+    // 3. If current server has become busy or missing, drop it
+    if (currentServer) {
+      const currentInfo = discoveredServers[currentServer];
+      if (!currentInfo || currentInfo.isBusy || currentInfo.modelId !== selectedModel) {
+        leaveCurrentServer();
+      }
+    }
+
     if (healthyServers.length === 0) {
       if (!currentServer) {
-        reportStatus("No " + selectedModel + " server online", "offline");
+        reportStatus("All " + selectedModel + " servers busy/offline", "offline");
       }
       return;
     }
 
+    // 4. Find the minimum queue length among healthy servers
     const smallestQueue = Math.min.apply(
       null,
       healthyServers.map(function (entry) {
         return entry.queueLength;
       })
     );
+
     const candidates = healthyServers.filter(function (entry) {
       return entry.queueLength === smallestQueue;
     });
 
+    // 5. Keep current server IF it's not busy AND has a queue close to the smallest
     if (currentServer && discoveredServers[currentServer]) {
-      const isCurrentCandidate = candidates.some(function (entry) {
-        return entry.serverId === currentServer;
-      });
-      if (isCurrentCandidate) return;
+      const currentInfo = discoveredServers[currentServer];
+      if (!currentInfo.isBusy && currentInfo.queueLength <= smallestQueue + 1) {
+        return; // Current server is still optimal
+      }
     }
 
-    joinServer(candidates[Math.floor(Math.random() * candidates.length)].serverId);
+    // 6. Switch to the best available candidate
+    const bestServer = candidates[Math.floor(Math.random() * candidates.length)].serverId;
+    if (bestServer !== currentServer) {
+      joinServer(bestServer);
+    }
   }
 
   function cleanupRelay() {
@@ -318,11 +341,21 @@
 
         if (!payload.modelId) return;
 
+        // Detect busy state from payload properties
+        const isBusy = Boolean(
+          payload.isBusy || 
+          payload.busy || 
+          payload.status === "busy" || 
+          (typeof payload.maxQueue === "number" && (payload.queueLength || 0) >= payload.maxQueue)
+        );
+
         discoveredServers[payload.serverId] = {
           modelId: payload.modelId,
-          queueLength: payload.queueLength || 0,
+          queueLength: Number(payload.queueLength) || 0,
+          isBusy: isBusy,
           lastSeen: Date.now()
         };
+
         pickBestServer();
         return;
       }
