@@ -4,7 +4,7 @@
   const DEACTIVATE_TOPIC = "xaida/servers/deactivate";
   const PING_TOPIC = "xaida/servers/ping";
   const SERVER_TIMEOUT_MS = 12000; 
-  const WATCHDOG_TIMEOUT_MS = 5000;
+  const WATCHDOG_TIMEOUT_MS = 5000; 
 
   function createWorkerInterval(fn, ms) {
     try {
@@ -32,6 +32,7 @@
 
   const tabId = Math.random().toString(36).substring(2, 6);
   const logicalClientId = storedUserId + "-" + tabId;
+  const clientResponseTopic = "xaida/client/" + logicalClientId + "/response";
 
   const discoveredServers = {};
 
@@ -61,8 +62,7 @@
       if (!relayIsConnected || !currentServer || !discoveredServers[currentServer]) {
         return false;
       }
-      const s = discoveredServers[currentServer];
-      return !s.isBusy;
+      return !discoveredServers[currentServer].isBusy;
     },
 
     start: function () {
@@ -79,11 +79,10 @@
     },
 
     sendPrompt: function (promptPayload) {
-      // Re-evaluate server availability before sending
       pickBestServer();
 
       if (!XaidaConnector.isReady()) {
-        reportStatus("No active/available server connected", "offline");
+        reportStatus("No available server connected", "offline");
         return false;
       }
 
@@ -91,7 +90,7 @@
       if (!serverInfo || serverInfo.isBusy || (Date.now() - serverInfo.lastSeen > SERVER_TIMEOUT_MS)) {
         removeServer(currentServer);
         if (window.XaidaMessages && window.XaidaMessages.addNoteLine) {
-          window.XaidaMessages.addNoteLine("Server busy or offline. Searching for available server...", true);
+          window.XaidaMessages.addNoteLine("Server busy. Re-routing request...", true);
         }
         return false;
       }
@@ -103,6 +102,7 @@
         text: promptPayload.text,
         imageDataUrl: promptPayload.imageDataUrl || null,
         requestId: promptPayload.requestId,
+        replyTopic: clientResponseTopic, // Universal reply topic
         sentAt: Date.now()
       });
 
@@ -158,7 +158,7 @@
     }
     if (currentServer === serverId) {
       leaveCurrentServer();
-      reportStatus("Server unavailable. Finding new server...", "waiting");
+      reportStatus("Finding available server...", "waiting");
       pickBestServer();
     }
   }
@@ -168,39 +168,28 @@
     currentServer = serverId;
     currentResponseTopic = "xaida/" + serverId + "/response/" + logicalClientId;
     if (relayClient && relayIsConnected) {
-      relayClient.subscribe(currentResponseTopic, function (subscribeError) {
-        if (!subscribeError) {
-          reportStatus("Server " + serverId, "online");
-        } else {
-          removeServer(serverId);
-        }
-      });
+      relayClient.subscribe(currentResponseTopic);
+      reportStatus("Server " + serverId, "online");
     }
   }
 
   function pickBestServer() {
     const now = Date.now();
 
-    // 1. Purge stale servers
     Object.keys(discoveredServers).forEach(function (serverId) {
       if (now - discoveredServers[serverId].lastSeen > SERVER_TIMEOUT_MS) {
         delete discoveredServers[serverId];
       }
     });
 
-    // 2. Filter available (non-busy) servers matching selected model
     const healthyServers = [];
     Object.keys(discoveredServers).forEach(function (serverId) {
       const serverInfo = discoveredServers[serverId];
       if (serverInfo.modelId === selectedModel && !serverInfo.isBusy) {
-        healthyServers.push({
-          serverId: serverId,
-          queueLength: serverInfo.queueLength
-        });
+        healthyServers.push({ serverId: serverId, queueLength: serverInfo.queueLength });
       }
     });
 
-    // 3. If current server has become busy or missing, drop it
     if (currentServer) {
       const currentInfo = discoveredServers[currentServer];
       if (!currentInfo || currentInfo.isBusy || currentInfo.modelId !== selectedModel) {
@@ -215,27 +204,22 @@
       return;
     }
 
-    // 4. Find the minimum queue length among healthy servers
     const smallestQueue = Math.min.apply(
       null,
-      healthyServers.map(function (entry) {
-        return entry.queueLength;
-      })
+      healthyServers.map(function (entry) { return entry.queueLength; })
     );
 
     const candidates = healthyServers.filter(function (entry) {
       return entry.queueLength === smallestQueue;
     });
 
-    // 5. Keep current server IF it's not busy AND has a queue close to the smallest
     if (currentServer && discoveredServers[currentServer]) {
       const currentInfo = discoveredServers[currentServer];
       if (!currentInfo.isBusy && currentInfo.queueLength <= smallestQueue + 1) {
-        return; // Current server is still optimal
+        return;
       }
     }
 
-    // 6. Switch to the best available candidate
     const bestServer = candidates[Math.floor(Math.random() * candidates.length)].serverId;
     if (bestServer !== currentServer) {
       joinServer(bestServer);
@@ -297,6 +281,8 @@
 
       reportStatus("Scanning servers", "waiting");
 
+      // Subscribe to personal response topic and global heartbeat topics
+      relayClient.subscribe(clientResponseTopic);
       relayClient.subscribe(HEARTBEAT_TOPIC);
       relayClient.subscribe(DEACTIVATE_TOPIC);
 
@@ -305,7 +291,6 @@
 
     relayClient.on("reconnect", function () {
       reportStatus("Reconnecting...", "waiting");
-      
       if (!watchdogTimer) {
         watchdogTimer = setTimeout(function () {
           forceReconnect();
@@ -341,7 +326,6 @@
 
         if (!payload.modelId) return;
 
-        // Detect busy state from payload properties
         const isBusy = Boolean(
           payload.isBusy || 
           payload.busy || 
@@ -367,7 +351,7 @@
         return;
       }
 
-      if (topic === currentResponseTopic && typeof XaidaConnector.onServerMessage === "function") {
+      if ((topic === currentResponseTopic || topic === clientResponseTopic) && typeof XaidaConnector.onServerMessage === "function") {
         XaidaConnector.onServerMessage(payload);
       }
     });
