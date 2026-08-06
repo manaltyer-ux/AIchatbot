@@ -217,17 +217,17 @@
     typingAnimationId = requestAnimationFrame(step);
   }
 
-  function resetStallTimer() {
+function resetStallTimer() {
     if (stallTimer) clearTimeout(stallTimer);
     stallTimer = setTimeout(function () {
       if (!activeRequestId) return;
       if (typingAnimationId) cancelAnimationFrame(typingAnimationId);
       if (activeAiBubble) {
-        activeAiBubble.textContent = "Error: Request timed out (No response activity for 45s).";
+        activeAiBubble.textContent = "Error: Request timed out (No activity for 60s).";
       }
       addNoteLine("Request timed out.", true);
       finishRequest();
-    }, 66000);
+    }, 60000);
   }
 
   function finishRequest() {
